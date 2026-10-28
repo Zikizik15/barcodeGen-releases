@@ -19,7 +19,9 @@ if getattr(sys, 'frozen', False):
 else:
     application_path = os.path.dirname(os.path.abspath(__file__))
 
-# 2) Добавляем папку проекта и все site-packages, которые Python видит
+# 2) Папка проекта — первой; системные site-packages — только в конец списка,
+#    как запасной вариант. Если поставить их первыми, они перекроют пакеты
+#    из venv, и подхватится не та версия Pillow/reportlab.
 sys.path.insert(0, application_path)
 
 try:
@@ -43,7 +45,7 @@ try:
 
     for p in extra_paths:
         if p and os.path.isdir(p) and p not in sys.path:
-            sys.path.insert(0, p)
+            sys.path.append(p)
 except Exception:
     pass
 

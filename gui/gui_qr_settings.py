@@ -68,15 +68,17 @@ class QRSettingsWindow(SettingsWindow):
 
         fmt = next((k for k, v in FORMATS.items() if v == self.qr_format.get()), "text")
         s = self.app.settings
-        s.set("qr_label_width", self.qr_w.get())
-        s.set("qr_label_height", self.qr_h.get())
-        s.set("qr_margin_top", self.qr_mt.get())
-        s.set("qr_margin_bottom", self.qr_mb.get())
-        s.set("qr_margin_left", self.qr_ml.get())
-        s.set("qr_margin_right", self.qr_mr.get())
-        s.set("qr_box_size", self.qr_box_size.get())
-        s.set("qr_format", fmt)
-        s.set("qr_show_border", self.qr_show_border.get())
+        s.update({
+            "qr_label_width": self.qr_w.get(),
+            "qr_label_height": self.qr_h.get(),
+            "qr_margin_top": self.qr_mt.get(),
+            "qr_margin_bottom": self.qr_mb.get(),
+            "qr_margin_left": self.qr_ml.get(),
+            "qr_margin_right": self.qr_mr.get(),
+            "qr_box_size": self.qr_box_size.get(),
+            "qr_format": fmt,
+            "qr_show_border": self.qr_show_border.get(),
+        })
 
         self.qr_tab.qr_format.set(fmt)
         self.qr_tab.sync_format()

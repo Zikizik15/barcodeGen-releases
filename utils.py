@@ -207,6 +207,27 @@ def find_font_path():
 
 
 # ========== ПРОВЕРКА КОДА ==========
+# EAN-13, EAN-8 и UPC-A: длина без контрольной цифры
+_GTIN_DATA_LEN = {"ean13": 12, "ean8": 7, "upca": 11}
+
+
+def gtin_check_digit(digits):
+    """Контрольная цифра EAN/UPC: справа налево веса 3, 1, 3, 1, …"""
+    total = sum(int(d) * (3 if i % 2 == 0 else 1) for i, d in enumerate(reversed(digits)))
+    return (10 - total % 10) % 10
+
+
+def _check_gtin(code_str, barcode_type, name):
+    """Если код введён вместе с контрольной цифрой — она должна быть верной.
+    Иначе python-barcode молча заменит её, и на этикетке окажется другой код."""
+    data_len = _GTIN_DATA_LEN[barcode_type]
+    if len(code_str) == data_len + 1:
+        expected = gtin_check_digit(code_str[:data_len])
+        if int(code_str[-1]) != expected:
+            return False, f"{name}: неверная контрольная цифра — последней должна быть {expected}"
+    return True, "OK"
+
+
 def validate_code(code, barcode_type):
     """Проверка кода на соответствие типу штрихкода"""
     code_str = str(code).strip()
@@ -219,12 +240,15 @@ def validate_code(code, barcode_type):
     elif barcode_type == "ean13":
         if not re.match(r'^\d{12,13}$', code_str):
             return False, "EAN-13: код должен состоять из 12 или 13 цифр"
+        return _check_gtin(code_str, barcode_type, "EAN-13")
     elif barcode_type == "ean8":
         if not re.match(r'^\d{7,8}$', code_str):
             return False, "EAN-8: код должен состоять из 7 или 8 цифр"
+        return _check_gtin(code_str, barcode_type, "EAN-8")
     elif barcode_type == "upca":
         if not re.match(r'^\d{11,12}$', code_str):
             return False, "UPC-A: код должен состоять из 11 или 12 цифр"
+        return _check_gtin(code_str, barcode_type, "UPC-A")
     elif barcode_type == "itf":
         if not re.match(r'^\d+$', code_str):
             return False, "ITF: только цифры"

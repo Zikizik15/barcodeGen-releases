@@ -57,8 +57,8 @@ class TestValidateCode:
         assert valid is False
 
     def test_ean13_valid(self):
-        """EAN-13: ровно 12 или 13 цифр."""
-        valid, msg = validate_code("1234567890123", "ean13")
+        """EAN-13: 13 цифр с верной контрольной цифрой."""
+        valid, msg = validate_code("4006381333931", "ean13")
         assert valid is True
 
     def test_ean13_12_digits(self):
@@ -77,8 +77,8 @@ class TestValidateCode:
         assert valid is False
 
     def test_ean8_valid(self):
-        """EAN-8: 7 или 8 цифр."""
-        valid, msg = validate_code("12345678", "ean8")
+        """EAN-8: 8 цифр с верной контрольной цифрой."""
+        valid, msg = validate_code("12345670", "ean8")
         assert valid is True
 
     def test_ean8_invalid(self):
@@ -365,3 +365,43 @@ class TestConstants:
     def test_default_qr_box_size(self):
         """DEFAULT_QR_BOX_SIZE = '8'."""
         assert DEFAULT_QR_BOX_SIZE == "8"
+
+
+# ========== Контрольная цифра EAN/UPC ==========
+
+from utils import gtin_check_digit
+
+
+class TestCheckDigit:
+    """python-barcode молча заменяет неверную контрольную цифру — ловим это до печати."""
+
+    def test_known_check_digits(self):
+        assert gtin_check_digit("400638133393") == 1
+        assert gtin_check_digit("1234567") == 0
+        assert gtin_check_digit("12345678901") == 2
+
+    @pytest.mark.parametrize("code,btype,expected", [
+        ("1234567890123", "ean13", 8),
+        ("12345678", "ean8", 0),
+        ("123456789013", "upca", 2),
+    ])
+    def test_wrong_check_digit_rejected(self, code, btype, expected):
+        valid, msg = validate_code(code, btype)
+        assert not valid
+        assert f"должна быть {expected}" in msg
+
+    @pytest.mark.parametrize("code,btype", [
+        ("400638133393", "ean13"),   # без контрольной — её посчитает генератор
+        ("1234567", "ean8"),
+        ("12345678901", "upca"),
+        ("123456789012", "upca"),
+    ])
+    def test_valid_codes_pass(self, code, btype):
+        assert validate_code(code, btype)[0]
+
+    def test_matches_python_barcode(self):
+        """Наша контрольная цифра совпадает с той, что поставит библиотека."""
+        import barcode
+        for data, btype in [("590123412345", "ean13"), ("9638507", "ean8"), ("03600029145", "upca")]:
+            full = barcode.get_barcode_class(btype)(data).get_fullcode()
+            assert full[-1] == str(gtin_check_digit(data))

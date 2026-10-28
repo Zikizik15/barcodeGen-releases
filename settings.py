@@ -42,6 +42,21 @@ except Exception:
     logger = _DummyLogger()
 
 
+def _write_atomic(path, text):
+    """Запись через временный файл и os.replace: если программа упадёт
+    посреди записи, старый файл останется целым."""
+    tmp = f"{path}.tmp"
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _write_json(path, data):
+    _write_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
+
+
 class SettingsManager:
     """Класс для управления настройками приложения"""
 
@@ -64,14 +79,26 @@ class SettingsManager:
             try:
                 with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
                     self.settings = json.load(f)
+                if not isinstance(self.settings, dict):
+                    raise ValueError("ожидался JSON-объект")
 
                 # Миграция старых ключей в новые
                 self._migrate_old_settings()
 
+                # Ключи, появившиеся в новых версиях, — со значениями по умолчанию
+                for key, value in self.get_default_settings().items():
+                    self.settings.setdefault(key, value)
+
                 logger.info(f"✅ Настройки загружены из {SETTINGS_FILE}")
             except Exception as e:
                 logger.error(f"Ошибка загрузки настроек: {e}")
-                self.settings = {}
+                # Повреждённый файл сохраняем для разбора и стартуем с умолчаний
+                try:
+                    os.replace(SETTINGS_FILE, f"{SETTINGS_FILE}.broken")
+                    logger.warning(f"Повреждённые настройки сохранены в {SETTINGS_FILE}.broken")
+                except OSError:
+                    pass
+                self.settings = self.get_default_settings()
         else:
             self.settings = self.get_default_settings()
             logger.info("Настройки по умолчанию (файла ещё нет)")
@@ -122,8 +149,7 @@ class SettingsManager:
     def save_settings(self, settings_dict):
         """Сохранение настроек"""
         try:
-            with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(settings_dict, f, ensure_ascii=False, indent=2)
+            _write_json(SETTINGS_FILE, settings_dict)
             self.settings = settings_dict
         except Exception as e:
             logger.error(f"Ошибка сохранения настроек: {e}")
@@ -178,6 +204,11 @@ class SettingsManager:
         self.settings[key] = value
         self.save_settings(self.settings)
 
+    def update(self, values):
+        """Установка нескольких значений с одной записью на диск."""
+        self.settings.update(values)
+        self.save_settings(self.settings)
+
     # ===== История =====
     def load_history(self):
         """Загрузка истории"""
@@ -201,8 +232,7 @@ class SettingsManager:
         self.history = self.history[-50:]
 
         try:
-            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.history, f, ensure_ascii=False, indent=2)
+            _write_json(HISTORY_FILE, self.history)
             logger.info(f"📝 История: добавлена запись {os.path.basename(filename)} ({codes_count} кодов)")
         except Exception as e:
             logger.error(f"Ошибка сохранения истории: {e}")
@@ -230,8 +260,7 @@ class SettingsManager:
         self.recent_files = self.recent_files[:10]
 
         try:
-            with open(RECENT_FILES_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.recent_files, f, ensure_ascii=False, indent=2)
+            _write_json(RECENT_FILES_FILE, self.recent_files)
         except Exception as e:
             logger.error(f"Ошибка сохранения недавних файлов: {e}")
 
@@ -243,8 +272,7 @@ class SettingsManager:
     def save_temp_codes(self, text):
         """Сохранение временных кодов"""
         try:
-            with open(TEMP_CODES_FILE, 'w', encoding='utf-8') as f:
-                f.write(text)
+            _write_atomic(TEMP_CODES_FILE, text)
             return True
         except Exception as e:
             logger.error(f"Ошибка автосохранения кодов: {e}")

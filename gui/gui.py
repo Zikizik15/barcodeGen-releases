@@ -1068,20 +1068,22 @@ class BarcodeApp:
                 self.progress_label.configure(text="Отмена…")
 
     def save_current_settings(self):
-        self.settings.set("barcode_type", self.barcode_type.get())
-        self.settings.set("barcode_label_width", self.label_width.get())
-        self.settings.set("barcode_label_height", self.label_height.get())
-        self.settings.set("barcode_margin_top", self.margin_top.get())
-        self.settings.set("barcode_margin_bottom", self.margin_bottom.get())
-        self.settings.set("barcode_margin_left", self.margin_left.get())
-        self.settings.set("barcode_margin_right", self.margin_right.get())
-        self.settings.set("barcode_show_border", self.show_border.get())
-        self.settings.set("barcode_labels_per_page", self.labels_per_page.get())
-        self.settings.set("barcode_selected_only", self.selected_only.get())
-        self.settings.set("barcode_batch_mode", self.batch_mode.get())
-        self.settings.set("barcode_use_template", self.use_template.get())
-        self.settings.set("barcode_show_text", self.show_text.get())
-        self.settings.set("barcode_dpi", self.barcode_dpi.get())
+        self.settings.update({
+            "barcode_type": self.barcode_type.get(),
+            "barcode_label_width": self.label_width.get(),
+            "barcode_label_height": self.label_height.get(),
+            "barcode_margin_top": self.margin_top.get(),
+            "barcode_margin_bottom": self.margin_bottom.get(),
+            "barcode_margin_left": self.margin_left.get(),
+            "barcode_margin_right": self.margin_right.get(),
+            "barcode_show_border": self.show_border.get(),
+            "barcode_labels_per_page": self.labels_per_page.get(),
+            "barcode_selected_only": self.selected_only.get(),
+            "barcode_batch_mode": self.batch_mode.get(),
+            "barcode_use_template": self.use_template.get(),
+            "barcode_show_text": self.show_text.get(),
+            "barcode_dpi": self.barcode_dpi.get(),
+        })
 
     @error_handler
     def show_barcode_settings(self):
