@@ -327,3 +327,83 @@ class TestLoadSettings:
         assert gen.batch_mode is True
         assert gen.barcode_dpi == "2400"
         assert gen.qr_box_size == "16"
+
+
+# ========== Регрессии: шаблон, текст под штрихкодом, QR, ZIP ==========
+
+TEMPLATE = {"label_width": 58, "label_height": 40, "elements": [
+    {"id": "barcode", "type": "barcode", "x": 4, "y": 12, "w": 50, "h": 22},
+    {"id": "t", "type": "text", "text": "{code} {name}", "x": 4, "y": 2, "w": 50, "h": 8, "font_size": 10},
+]}
+
+
+def _gen(**overrides):
+    sm = SettingsManager()
+    sm.settings = sm.get_default_settings()
+    sm.settings.update(overrides)
+    return BarcodeGenerator(sm)
+
+
+class TestTemplateSwitch:
+    """«Использовать сохранённый шаблон» реально включает/выключает шаблон."""
+
+    def test_template_used_when_enabled(self, tmp_path, monkeypatch):
+        gen = _gen(label_template=TEMPLATE, barcode_use_template=True)
+        called = []
+        monkeypatch.setattr(gen, "_create_pdf_from_template", lambda *a, **k: called.append("tpl"))
+        monkeypatch.setattr(gen, "_create_pdf_default", lambda *a, **k: called.append("default"))
+        gen.create_pdf(str(tmp_path / "a.pdf"), [])
+        assert called == ["tpl"]
+
+    def test_template_skipped_when_disabled(self, tmp_path, monkeypatch):
+        gen = _gen(label_template=TEMPLATE, barcode_use_template=False)
+        called = []
+        monkeypatch.setattr(gen, "_create_pdf_from_template", lambda *a, **k: called.append("tpl"))
+        monkeypatch.setattr(gen, "_create_pdf_default", lambda *a, **k: called.append("default"))
+        gen.create_pdf(str(tmp_path / "a.pdf"), [])
+        assert called == ["default"]
+
+    def test_explicit_no_template_for_qr(self, tmp_path, monkeypatch):
+        """QR-паспорта передают use_template=False — шаблон штрихкодов не применяется."""
+        gen = _gen(label_template=TEMPLATE, barcode_use_template=True)
+        called = []
+        monkeypatch.setattr(gen, "_create_pdf_from_template", lambda *a, **k: called.append("tpl"))
+        monkeypatch.setattr(gen, "_create_pdf_default", lambda *a, **k: called.append(("default", a[-1])))
+        gen.create_pdf(str(tmp_path / "a.pdf"), [], use_template=False, keep_aspect=True)
+        assert called == [("default", True)]  # без шаблона и без растягивания
+
+    def test_template_pdf_with_metadata(self, tmp_path):
+        gen = _gen(label_template=TEMPLATE, barcode_use_template=True)
+        img = gen.generate_barcode_image("ABC123", str(tmp_path))
+        pdf = tmp_path / "t.pdf"
+        gen.create_pdf(str(pdf), [("ABC123", img)], metadata={"ABC123": {"name": "Товар"}})
+        assert pdf.stat().st_size > 0
+
+
+class TestWriterOptions:
+    """Параметры отрисовки действительно применяются к картинке."""
+
+    def test_text_hidden_in_template_mode(self):
+        gen = _gen(label_template=TEMPLATE, barcode_use_template=True)
+        assert gen.writer_options()["write_text"] is False
+
+    def test_text_follows_setting_without_template(self):
+        assert _gen(barcode_show_text=True).writer_options()["write_text"] is True
+        assert _gen(barcode_show_text=False).writer_options()["write_text"] is False
+
+    def test_text_actually_removed_from_image(self):
+        from PIL import Image
+        with_text = Image.open(_gen(barcode_show_text=True).generate_barcode_to_bytes("ABC123"))
+        no_text = Image.open(_gen(barcode_show_text=False).generate_barcode_to_bytes("ABC123"))
+        assert no_text.height < with_text.height
+
+
+class TestWriteZip:
+    def test_duplicate_names_not_overwritten(self, tmp_path):
+        import zipfile
+        gen = _gen()
+        img = gen.generate_barcode_image("ABC", str(tmp_path))
+        # sanitize_filename превращает оба кода в «A_B»
+        out = tmp_path / "a.zip"
+        gen.write_zip(str(out), [("A-B", img), ("A/B", img)])
+        assert sorted(zipfile.ZipFile(out).namelist()) == ["A_B.png", "A_B_2.png"]

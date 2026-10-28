@@ -38,6 +38,7 @@ class BarcodeSettingsWindow(SettingsWindow):
         self.batch_mode = tk.BooleanVar(value=a.batch_mode.get())
         self.show_border = tk.BooleanVar(value=a.show_border.get())
         self.use_template = tk.BooleanVar(value=a.use_template.get())
+        self.show_text = tk.BooleanVar(value=a.show_text.get())
         preset = a.selected_preset.get()
         self.preset_var = tk.StringVar(value=preset if preset in LABEL_PRESETS else CUSTOM_PRESET)
 
@@ -75,6 +76,7 @@ class BarcodeSettingsWindow(SettingsWindow):
         # ----- Дополнительно -----
         extra = self.section("Дополнительно")
         for text, var in [
+            ("Печатать код под штрихкодом (без шаблона)", self.show_text),
             ("Генерировать только выделенные строки", self.selected_only),
             ("Сохранять картинки в ZIP вместо PDF", self.batch_mode),
             ("Рисовать рамку вокруг этикетки", self.show_border),
@@ -114,6 +116,7 @@ class BarcodeSettingsWindow(SettingsWindow):
         a.batch_mode.set(self.batch_mode.get())
         a.show_border.set(self.show_border.get())
         a.use_template.set(self.use_template.get())
+        a.show_text.set(self.show_text.get())
         if self.preset_var.get() in LABEL_PRESETS:
             a.selected_preset.set(self.preset_var.get())
             a.settings.set("selected_preset", self.preset_var.get())

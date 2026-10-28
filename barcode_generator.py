@@ -73,6 +73,8 @@ class BarcodeGenerator:
         self.batch_mode = s.get("barcode_batch_mode", s.get("batch_mode", False))
         self.barcode_dpi = s.get("barcode_dpi", "600")
         self.qr_box_size = s.get("qr_box_size", DEFAULT_QR_BOX_SIZE)
+        self.show_text = s.get("barcode_show_text", True)
+        self.use_template = s.get("barcode_use_template", True)
         # use_qr зафиксирован в False: модуль штрихкодов больше не умеет QR.
         self.use_qr = False
 
@@ -90,20 +92,31 @@ class BarcodeGenerator:
         if self.progress_callback:
             self.progress_callback(current, total)
 
+    def template_active(self):
+        """Будет ли PDF штрихкодов собираться по сохранённому шаблону."""
+        template = self.settings.get("label_template")
+        return bool(self.use_template and template and template.get("elements"))
+
+    def writer_options(self):
+        """Параметры отрисовки штрихкода. Их нужно передавать прямо в
+        write()/save(): python-barcode при отрисовке заменяет параметры,
+        заданные через writer.set_options(), своими значениями по умолчанию."""
+        params = get_barcode_params(self.label_width, self.label_height, dpi=self.barcode_dpi)
+        return {
+            'module_width': params['module_width'],
+            'module_height': params['module_height'],
+            'quiet_zone': 0.0,
+            # В шаблоне код печатается отдельным текстовым элементом {code}
+            'write_text': bool(self.show_text) and not self.template_active(),
+            'dpi': params['dpi'],
+        }
+
     def get_writer(self):
         writer = ImageWriter()
         font_path = find_font_path()
         if font_path:
             writer.font_path = font_path
-
-        params = get_barcode_params(self.label_width, self.label_height, dpi=self.barcode_dpi)
-        writer.set_options({
-            'module_width': params['module_width'],
-            'module_height': params['module_height'],
-            'quiet_zone': 0.0,
-            'write_text': False,
-            'dpi': params['dpi'],
-        })
+        writer.set_options(self.writer_options())
         return writer
 
     def generate_single_barcode(self, code, as_bytes=True, temp_dir=None, force_qr=False):
@@ -144,13 +157,13 @@ class BarcodeGenerator:
 
             if as_bytes:
                 buffer = io.BytesIO()
-                barcode_class(code_str, writer=writer).write(buffer)
+                barcode_class(code_str, writer=writer).write(buffer, options=self.writer_options())
                 buffer.seek(0)
                 return crop_barcode_aggressive_from_bytes(buffer)
             else:
                 safe_name = sanitize_filename(code_str)
                 base_path = os.path.join(temp_dir or tempfile.mkdtemp(), f"barcode_{safe_name}_{uuid.uuid4().hex[:6]}")
-                saved_path = barcode_class(code_str, writer=writer).save(base_path)
+                saved_path = barcode_class(code_str, writer=writer).save(base_path, options=self.writer_options())
                 if saved_path and os.path.exists(saved_path):
                     return crop_barcode_aggressive(saved_path)
                 return None
@@ -164,17 +177,22 @@ class BarcodeGenerator:
     def generate_barcode_image(self, code, temp_dir, force_qr=False):
         return self.generate_single_barcode(code, as_bytes=False, temp_dir=temp_dir, force_qr=force_qr)
 
-    def create_pdf(self, filename, barcode_images):
+    def create_pdf(self, filename, barcode_images, metadata=None, use_template=None,
+                   keep_aspect=False):
+        """metadata — {код: {name, price, ...}} для плейсхолдеров шаблона.
+        use_template=None — по настройке «Использовать сохранённый шаблон».
+        keep_aspect — не растягивать картинку (нужно для QR-кодов)."""
         if not REPORTLAB_AVAILABLE:
             raise ImportError("reportlab не установлен")
-        template = self.settings.get("label_template")
-        use_template = self.settings.get("use_template", True)
-        if template and template.get("elements") and use_template:
-            self._create_pdf_from_template(filename, barcode_images, template)
+        if use_template is None:
+            use_template = self.template_active()
+        if use_template:
+            self._create_pdf_from_template(filename, barcode_images,
+                                           self.settings.get("label_template"), metadata)
         else:
-            self._create_pdf_default(filename, barcode_images)
+            self._create_pdf_default(filename, barcode_images, keep_aspect)
 
-    def _create_pdf_default(self, filename, barcode_images):
+    def _create_pdf_default(self, filename, barcode_images, keep_aspect=False):
         scale = 2.83465
         page_w, page_h = self.label_width * scale, self.label_height * scale
         mt, mb, ml, mr = [m * scale for m in self.margins]
@@ -204,12 +222,13 @@ class BarcodeGenerator:
                 img_w, img_h = w * 0.98, h * 0.95
                 img_x = x + (w - img_w) / 2
                 img_y = y + (h - img_h) / 2
-                c.drawImage(img, img_x, img_y, width=img_w, height=img_h)
+                c.drawImage(img, img_x, img_y, width=img_w, height=img_h,
+                            preserveAspectRatio=keep_aspect, anchor='c')
             except Exception as e:
                 logger.error(f"Ошибка вставки: {e}")
         c.save()
 
-    def _create_pdf_from_template(self, filename, barcode_images, template):
+    def _create_pdf_from_template(self, filename, barcode_images, template, metadata=None):
         scale = 2.83465
         label_w = template.get("label_width", self.label_width)
         label_h = template.get("label_height", self.label_height)
@@ -228,7 +247,7 @@ class BarcodeGenerator:
                 pass
 
         c = canvas.Canvas(filename, pagesize=(page_w, page_h))
-        meta_all = self.settings.get("codes_metadata", {}) or {}
+        meta_all = metadata if metadata is not None else (self.settings.get("codes_metadata", {}) or {})
 
         for i, (code, img_path) in enumerate(barcode_images):
             if i > 0:
@@ -289,8 +308,20 @@ class BarcodeGenerator:
                     image_files.append((code, img_path))
             if not image_files:
                 raise Exception("Не удалось сгенерировать изображения")
-            with zipfile.ZipFile(filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for code, img_path in image_files:
-                    safe_name = sanitize_filename(code)
-                    zipf.write(img_path, f"{safe_name}.png")
+            self.write_zip(filename, image_files)
         return len(image_files)
+
+    @staticmethod
+    def write_zip(filename, image_files):
+        """Складывает готовые картинки [(код, путь), ...] в ZIP-архив."""
+        import zipfile
+        used = set()
+        with zipfile.ZipFile(filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for code, img_path in image_files:
+                name = sanitize_filename(code)
+                # Разные коды могут дать одинаковое имя файла — не перезаписываем
+                unique, n = name, 2
+                while unique in used:
+                    unique, n = f"{name}_{n}", n + 1
+                used.add(unique)
+                zipf.write(img_path, f"{unique}.png")

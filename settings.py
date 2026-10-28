@@ -151,6 +151,7 @@ class SettingsManager:
             "barcode_selected_only": False,
             "barcode_batch_mode": False,
             "barcode_use_template": True,
+            "barcode_show_text": True,
 
             # ===== Модуль «QR-паспорта» =====
             "qr_label_width": "58",

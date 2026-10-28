@@ -15,7 +15,9 @@ import os
 import re
 import random
 import uuid
+import queue
 import tempfile
+import threading
 import traceback
 from datetime import datetime
 
@@ -27,7 +29,7 @@ from .gui_qr_tab import QRPassportTab
 
 from settings import SettingsManager
 from barcode_generator import BarcodeGenerator
-from utils import BARCODE_TYPES, open_pdf, validate_code
+from utils import BARCODE_TYPES, open_pdf, validate_code, read_codes_with_metadata
 
 from logger import logger
 
@@ -122,10 +124,14 @@ class BarcodeApp:
         self.selected_only = BooleanVar(value=self.settings.get("barcode_selected_only", False))
         self.batch_mode = BooleanVar(value=self.settings.get("barcode_batch_mode", False))
         self.use_template = BooleanVar(value=self.settings.get("barcode_use_template", True))
+        self.show_text = BooleanVar(value=self.settings.get("barcode_show_text", True))
         self.barcode_dpi = StringVar(value=self.settings.get("barcode_dpi", "600"))
         self.search_var = StringVar(value="")
 
         self.history_data = []
+        # Данные из CSV/Excel для плейсхолдеров шаблона: {код: {name, price, ...}}
+        self.codes_metadata = dict(self.settings.get("codes_metadata") or {})
+        self._job = None  # идущая фоновая генерация
         self.recent_files = []
         self.preview_selection = []
 
@@ -152,6 +158,8 @@ class BarcodeApp:
     def on_closing(self):
         try:
             logger.info("Закрытие приложения пользователем")
+            if self._job is not None:
+                self._job["cancel"].set()
             self.save_current_settings()
 
             if self.text_codes.get("1.0", "end").strip():
@@ -247,7 +255,7 @@ class BarcodeApp:
     def on_drop(self, event):
         # splitlist корректно разбирает пути с пробелами: {C:/Мои файлы/codes.txt}
         for file_path in self.root.tk.splitlist(event.data):
-            if file_path.lower().endswith('.txt'):
+            if file_path.lower().endswith(('.txt', '.csv', '.xlsx')):
                 self.load_codes_from_file(file_path)
                 break
 
@@ -577,10 +585,10 @@ class BarcodeApp:
 
         self.text_codes.tag_remove("invalid", "1.0", "end")
 
-        for i, code in enumerate(codes):
+        for line_no, code in self._code_lines():
             valid, _ = validate_code(code, self.barcode_type.get())
             if not valid:
-                self.text_codes.tag_add("invalid", f"{i+1}.0", f"{i+1}.{len(code)}")
+                self.text_codes.tag_add("invalid", f"{line_no}.0", f"{line_no}.end")
 
         self.text_codes.tag_config("invalid", background=T.INVALID_BG, foreground=T.ERROR)
 
@@ -635,46 +643,81 @@ class BarcodeApp:
         self.history_data = self.settings.get_history()
 
     # ===== РАБОТА С ФАЙЛАМИ =====
+    def _code_lines(self):
+        """[(номер строки в поле, код), ...] — пустые строки пропускаются,
+        но номера остаются настоящими (нужно для подсветки и выделения)."""
+        lines = self.text_codes.get("1.0", "end-1c").split('\n')
+        return [(n, line.strip()) for n, line in enumerate(lines, 1) if line.strip()]
+
     def get_codes_list(self):
-        codes = [line.strip() for line in self.text_codes.get("1.0", "end").strip().split('\n') if line.strip()]
+        code_lines = self._code_lines()
 
         if self.selected_only.get():
             selected_ranges = self.text_codes.tag_ranges("sel")
             if selected_ranges:
-                selected_codes = []
+                selected = set()
                 for i in range(0, len(selected_ranges), 2):
-                    start = selected_ranges[i]
-                    end = selected_ranges[i + 1]
-                    start_line = int(str(start).split('.')[0])
-                    end_line = int(str(end).split('.')[0])
-                    for line_num in range(start_line, end_line + 1):
-                        if line_num - 1 < len(codes):
-                            selected_codes.append(codes[line_num - 1])
-                return selected_codes
-        return codes
+                    start_line, _ = map(int, str(selected_ranges[i]).split('.'))
+                    end_line, end_col = map(int, str(selected_ranges[i + 1]).split('.'))
+                    # Выделение до начала следующей строки её не захватывает
+                    if end_col == 0 and end_line > start_line:
+                        end_line -= 1
+                    selected.update(range(start_line, end_line + 1))
+                return [code for n, code in code_lines if n in selected]
+        return [code for _, code in code_lines]
 
     @error_handler
     def load_codes_from_file(self, filename):
         try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                current = self.text_codes.get("1.0", "end").strip()
-                new_codes = f.read()
-                if current:
-                    self.text_codes.insert("end", "\n" + new_codes)
-                else:
-                    self.text_codes.insert("1.0", new_codes)
+            name = os.path.basename(filename)
+            if filename.lower().endswith(('.csv', '.xlsx')):
+                # Код + колонки (name, price, ...) для плейсхолдеров шаблона
+                rows = read_codes_with_metadata(filename)
+                if not rows:
+                    messagebox.showwarning("Внимание", f"В файле {name} не найдено кодов")
+                    return
+                self._append_codes("\n".join(code for code, _ in rows))
+                columns = set()
+                for code, meta in rows:
+                    if meta:
+                        self.codes_metadata[code] = meta
+                        columns.update(meta)
+                self.settings.set("codes_metadata", self.codes_metadata)
+                extra = ""
+                if columns:
+                    extra = " · для шаблона: " + ", ".join("{" + c + "}" for c in sorted(columns))
+                message = (f"Добавлено {len(rows)} {plural(len(rows), 'код', 'кода', 'кодов')} "
+                           f"из {name}{extra}")
+            else:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    self._append_codes(f.read())
+                message = f"Добавлено из {name}"
+            # Сначала пересчёт (он пишет свой статус), потом — итог загрузки
             self.update_all()
-            self.set_status(f"Добавлено из {os.path.basename(filename)}", 'success')
+            self.set_status(message, 'success')
             self.settings.add_recent_file(filename)
             logger.info(f"Загружен файл: {filename}")
         except Exception as e:
             logger.error(f"Ошибка загрузки файла {filename}: {e}")
             raise
 
+    def _append_codes(self, text):
+        """Дописывает коды в конец поля, с новой строки."""
+        text = text.strip("\n")
+        if not text:
+            return
+        if self.text_codes.get("1.0", "end-1c").strip():
+            self.text_codes.insert("end-1c", "\n" + text)
+        else:
+            self.text_codes.delete("1.0", "end")
+            self.text_codes.insert("1.0", text)
+
     @error_handler
     def load_from_file(self):
         self.show_page("input")
-        filename = filedialog.askopenfilename(filetypes=[("Текстовые файлы", "*.txt"), ("CSV файлы", "*.csv")])
+        filename = filedialog.askopenfilename(filetypes=[
+            ("Коды и таблицы", "*.txt *.csv *.xlsx"), ("Текстовые файлы", "*.txt"),
+            ("CSV", "*.csv"), ("Excel", "*.xlsx")])
         if filename:
             self.load_codes_from_file(filename)
 
@@ -698,6 +741,8 @@ class BarcodeApp:
             return
         if messagebox.askyesno("Подтверждение", "Очистить все коды?"):
             self.text_codes.delete("1.0", "end")
+            self.codes_metadata = {}
+            self.settings.set("codes_metadata", {})
             self.update_all()
             logger.info("Коды очищены")
 
@@ -870,6 +915,10 @@ class BarcodeApp:
     # ===== ГЕНЕРАЦИЯ PDF =====
     @error_handler
     def generate_pdf(self):
+        if self._job is not None:
+            self.set_status("Генерация уже идёт", 'warning')
+            return
+
         codes = self.get_codes_list()
         if not codes:
             messagebox.showwarning("Внимание", "Нет кодов для генерации")
@@ -887,79 +936,136 @@ class BarcodeApp:
         self.save_current_settings()
         self.generator.load_settings()
 
-        if self.batch_mode.get():
+        as_zip = self.batch_mode.get()
+        if as_zip:
             filename = filedialog.asksaveasfilename(title="Сохранить ZIP архив", defaultextension=".zip",
-                                                      filetypes=[("ZIP архивы", "*.zip")], initialfile="barcodes.zip")
-            if filename:
-                try:
-                    count = self.generator.generate_zip_archive(codes, filename)
-                    self.set_status(f"ZIP архив создан: {os.path.basename(filename)}", 'success')
-                    messagebox.showinfo("Готово", f"ZIP архив создан!\nСохранено {count} изображений")
-                    logger.info(f"Создан ZIP архив: {filename} ({count} изображений)")
-                except Exception as e:
-                    logger.error(f"Ошибка создания ZIP архива: {e}")
-                    raise
-            return
-
-        filename = filedialog.asksaveasfilename(title="Сохранить PDF", defaultextension=".pdf",
-                                                  filetypes=[("PDF файлы", "*.pdf")], initialfile="barcodes.pdf")
+                                                    filetypes=[("ZIP архивы", "*.zip")], initialfile="barcodes.zip")
+        else:
+            filename = filedialog.asksaveasfilename(title="Сохранить PDF", defaultextension=".pdf",
+                                                    filetypes=[("PDF файлы", "*.pdf")], initialfile="barcodes.pdf")
         if not filename:
             return
 
-        self.show_progress(len(codes))
+        job = {
+            "queue": queue.Queue(),
+            "cancel": threading.Event(),
+            "filename": filename,
+            "as_zip": as_zip,
+            "total": len(codes),
+            "barcode_type": self.barcode_type.get(),
+            "label_size": f"{self.label_width.get()}×{self.label_height.get()}",
+        }
+        self._job = job
+        self.show_progress(len(codes), "Создание ZIP" if as_zip else "Создание PDF")
         self.set_status("Генерация штрихкодов...", 'warning')
+        threading.Thread(target=self._generate_worker, args=(job, codes, dict(self.codes_metadata)),
+                         daemon=True).start()
+        self.root.after(50, self._poll_job)
 
+    def _generate_worker(self, job, codes, metadata):
+        """Фоновый поток генерации. К Tk не обращается — только кладёт
+        сообщения в очередь, которую забирает _poll_job в основном потоке."""
+        q = job["queue"]
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
-                barcode_images = []
-                invalid_codes = []
-                total = len(codes)
-
-                for i, code in enumerate(codes):
-                    self.update_progress(i + 1, total)
-                    self.set_status(f"Генерация {i+1}/{total}: {code[:30]}...", 'warning')
-
-                    valid, msg = validate_code(code, self.barcode_type.get())
+                images, invalid = [], []
+                for i, code in enumerate(codes, 1):
+                    if job["cancel"].is_set():
+                        q.put(("cancelled", None))
+                        return
+                    valid, msg = validate_code(code, job["barcode_type"])
                     if not valid:
-                        invalid_codes.append(f"{code} - {msg}")
-                        continue
-
-                    img_path = self.generator.generate_barcode_image(code, temp_dir)
-                    if img_path:
-                        barcode_images.append((code, img_path))
+                        invalid.append(f"{code} — {msg}")
                     else:
-                        invalid_codes.append(f"{code} - ошибка генерации")
+                        img_path = self.generator.generate_barcode_image(code, temp_dir)
+                        if img_path:
+                            images.append((code, img_path))
+                        else:
+                            invalid.append(f"{code} — ошибка генерации")
+                    q.put(("progress", i))
 
-                if not barcode_images:
-                    self.hide_progress()
-                    messagebox.showerror("Ошибка", "Не удалось сгенерировать ни одного штрихкода")
-                    self.set_status("Ошибка генерации", 'error')
+                if job["cancel"].is_set():
+                    q.put(("cancelled", None))
+                    return
+                if not images:
+                    q.put(("empty", invalid))
                     return
 
-                if invalid_codes:
-                    msg = "Следующие коды не были сгенерированы:\n" + "\n".join(invalid_codes[:10])
-                    if len(invalid_codes) > 10:
-                        msg += f"\n... и ещё {len(invalid_codes) - 10}"
-                    messagebox.showwarning("Предупреждение", msg)
-                    logger.warning(f"Не сгенерированы коды: {invalid_codes}")
-
-                self.generator.create_pdf(filename, barcode_images)
-                self.settings.add_history(filename, len(barcode_images),
-                                           self.barcode_type.get(),
-                                           f"{self.label_width.get()}×{self.label_height.get()}")
-                self.load_history()
-                logger.info(f"Создан PDF: {filename} ({len(barcode_images)} этикеток)")
-
-            self.hide_progress()
-            self.set_status(f"PDF создан: {os.path.basename(filename)}", 'success')
-
-            if messagebox.askyesno("Готово", f"PDF создан!\n{filename}\n\nОткрыть файл?"):
-                open_pdf(filename)
-
+                q.put(("saving", None))
+                if job["as_zip"]:
+                    self.generator.write_zip(job["filename"], images)
+                else:
+                    self.generator.create_pdf(job["filename"], images, metadata=metadata)
+                q.put(("done", (len(images), invalid)))
         except Exception as e:
-            self.hide_progress()
-            logger.error(f"Ошибка генерации PDF: {e}")
-            raise
+            logger.error(f"Ошибка генерации:\n{traceback.format_exc()}")
+            q.put(("error", e))
+
+    def _poll_job(self):
+        """Забирает сообщения фоновой генерации и обновляет окно прогресса."""
+        job = self._job
+        if job is None:
+            return
+        try:
+            while True:
+                kind, data = job["queue"].get_nowait()
+                if kind == "progress":
+                    self.update_progress(data, job["total"])
+                elif kind == "saving":
+                    self.progress_label.configure(text="Сохранение файла…")
+                else:
+                    self._finish_job(job, kind, data)
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(50, self._poll_job)
+
+    def _finish_job(self, job, kind, data):
+        self._job = None
+        self.hide_progress()
+        name = os.path.basename(job["filename"])
+
+        if kind == "cancelled":
+            self.set_status("Генерация отменена", 'warning')
+            return
+        if kind == "error":
+            self.set_status("Ошибка генерации", 'error')
+            messagebox.showerror("Ошибка", f"Не удалось создать файл:\n{data}")
+            return
+
+        invalid = data if kind == "empty" else data[1]
+        if invalid:
+            msg = "Следующие коды не были сгенерированы:\n" + "\n".join(invalid[:10])
+            if len(invalid) > 10:
+                msg += f"\n... и ещё {len(invalid) - 10}"
+            logger.warning(f"Не сгенерированы коды: {invalid}")
+        if kind == "empty":
+            self.set_status("Ошибка генерации", 'error')
+            messagebox.showerror("Ошибка", "Не удалось сгенерировать ни одного штрихкода"
+                                 + ("\n\n" + msg if invalid else ""))
+            return
+        if invalid:
+            messagebox.showwarning("Предупреждение", msg)
+
+        count = data[0]
+        if job["as_zip"]:
+            self.set_status(f"ZIP архив создан: {name}", 'success')
+            messagebox.showinfo("Готово", f"ZIP архив создан!\nСохранено {count} изображений")
+            logger.info(f"Создан ZIP архив: {job['filename']} ({count} изображений)")
+            return
+
+        self.settings.add_history(job["filename"], count, job["barcode_type"], job["label_size"])
+        self.load_history()
+        self.set_status(f"PDF создан: {name}", 'success')
+        logger.info(f"Создан PDF: {job['filename']} ({count} этикеток)")
+        if messagebox.askyesno("Готово", f"PDF создан!\n{job['filename']}\n\nОткрыть файл?"):
+            open_pdf(job["filename"])
+
+    def cancel_generation(self):
+        if self._job is not None:
+            self._job["cancel"].set()
+            if self.progress_window:
+                self.progress_label.configure(text="Отмена…")
 
     def save_current_settings(self):
         self.settings.set("barcode_type", self.barcode_type.get())
@@ -974,6 +1080,7 @@ class BarcodeApp:
         self.settings.set("barcode_selected_only", self.selected_only.get())
         self.settings.set("barcode_batch_mode", self.batch_mode.get())
         self.settings.set("barcode_use_template", self.use_template.get())
+        self.settings.set("barcode_show_text", self.show_text.get())
         self.settings.set("barcode_dpi", self.barcode_dpi.get())
 
     @error_handler
@@ -986,30 +1093,36 @@ class BarcodeApp:
         # Когда окно закроется — принудительно убираем прозрачность главного
         self.root.after(100, lambda: fix_transparency_after_close(self.root))
 
-    def show_progress(self, total):
-        self.progress_window = self._dialog("Генерация", 420, 170, modal=False)
+    def show_progress(self, total, title_text="Генерация"):
+        self.progress_window = self._dialog(title_text, 440, 176)
         self.progress_window.resizable(False, False)
+        self.progress_window.protocol("WM_DELETE_WINDOW", self.cancel_generation)
 
-        T.label(self.progress_window, "Генерация штрихкодов", size=17, weight="bold"
+        T.label(self.progress_window, title_text.upper(), size=17, weight="black"
                 ).pack(anchor="w", padx=28, pady=(26, 14))
 
-        self.progress_bar = ctk.CTkProgressBar(self.progress_window, height=8, corner_radius=4)
+        self.progress_bar = ctk.CTkProgressBar(self.progress_window, height=10, corner_radius=5)
         self.progress_bar.set(0)
         self.progress_bar.pack(fill="x", padx=28)
 
-        self.progress_label = T.label(self.progress_window, f"0 из {total}", size=12, color=T.TEXT_2)
-        self.progress_label.pack(anchor="w", padx=28, pady=(10, 0))
-
-        self.root.update()
+        row = ctk.CTkFrame(self.progress_window, fg_color="transparent")
+        row.pack(fill="x", padx=28, pady=(14, 0))
+        self.progress_label = T.label(row, f"0 из {total}", size=13, weight="semibold", color=T.TEXT_2)
+        self.progress_label.pack(side="left")
+        T.button(row, "Отмена", self.cancel_generation, variant="danger", height=36, width=110
+                 ).pack(side="right")
 
     def update_progress(self, current, total):
         if self.progress_bar:
             self.progress_bar.set(current / max(total, 1))
             self.progress_label.configure(text=f"{current} из {total}")
-            self.root.update()
 
     def hide_progress(self):
         if self.progress_window:
+            try:
+                self.progress_window.grab_release()
+            except Exception:
+                pass
             self.progress_window.destroy()
             self.progress_window = None
             self.progress_bar = None

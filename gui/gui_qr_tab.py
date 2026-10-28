@@ -447,17 +447,10 @@ class QRPassportTab:
                     messagebox.showerror("Ошибка", "Не удалось сгенерировать QR")
                     return
 
-                meta = {}
-                for rec in self.records:
-                    payload = build_qr_payload(rec, self.qr_format.get())
-                    meta[payload] = {
-                        "fio": rec.get("fio", ""),
-                        "kit": (rec.get("kit", "") or "").replace("\n", ", "),
-                        "date": rec.get("date", ""),
-                    }
-                self.app.settings.set("codes_metadata", meta)
-
-                gen.create_pdf(path, barcode_images)
+                # Шаблон этикетки рассчитан на штрихкоды (свой размер, растянутая
+                # картинка) — QR-паспорта печатаются по своим настройкам, без
+                # искажения пропорций QR-кода.
+                gen.create_pdf(path, barcode_images, use_template=False, keep_aspect=True)
 
             self.app.settings.add_history(path, len(barcode_images),
                                             "qr-passport",
