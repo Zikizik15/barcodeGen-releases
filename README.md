@@ -47,7 +47,19 @@ python3 main.py
 ./build.sh
 ```
 
-### Windows
+### Windows: установщик (рекомендуется)
+
+```bat
+build_installer.bat
+```
+
+Результат: `dist\installerarcodeGen-<версия>-setup.exe` — обычный установщик
+с ярлыками в «Пуске» и на рабочем столе и удалением через «Приложения».
+Ставится без прав администратора. Программа в этом варианте запускается
+быстрее, чем одиночный exe. Нужен [Inno Setup 6](https://jrsoftware.org/isinfo.php):
+`winget install --id JRSoftware.InnoSetup -e`.
+
+### Windows: один exe-файл
 
 ```bat
 build.bat
@@ -107,7 +119,9 @@ BarcodeGen/
 ├── version.py               # Номер версии (единственное место)
 ├── pyproject.toml           # Конфигурация сборки
 ├── requirements.txt         # Зависимости
-├── build.sh / build.bat     # Скрипты PyInstaller
+├── build.sh / build.bat     # Скрипты PyInstaller (один exe)
+├── build_installer.bat      # Сборка установщика
+├── installer.iss            # Скрипт установщика Inno Setup
 ├── fonts/                   # Шрифт Montserrat (лицензия OFL)
 ├── gui/
 │   ├── theme.py             # Дизайн-система: палитра, шрифты, иконки, готовые виджеты
