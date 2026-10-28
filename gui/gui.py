@@ -34,6 +34,7 @@ from utils import (BARCODE_TYPES, open_pdf, validate_code, read_codes_with_metad
 
 from logger import logger
 from version import __version__, APP_NAME
+import updater
 
 T.apply_theme()
 
@@ -153,6 +154,12 @@ class BarcodeApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.root.after(500, self.load_backup)
         self.load_history()
+
+        # Тихая проверка обновлений вскоре после запуска (только у установленной
+        # программы или если источник задан через BARCODEGEN_UPDATE_URL)
+        self.update_manifest = None
+        if updater.can_self_update() or os.environ.get("BARCODEGEN_UPDATE_URL"):
+            self.root.after(3000, self.check_updates_background)
 
         logger.info("✅ Приложение успешно инициализировано")
 
@@ -345,8 +352,17 @@ class BarcodeApp:
         )
         about.pack(side="bottom", fill="x", padx=14, pady=(0, 14))
 
+        # Плашка «Доступно обновление» — появляется над «О программе»
+        self.update_banner = ctk.CTkFrame(sidebar, fg_color=T.YELLOW, corner_radius=12)
+        self.update_banner_label = T.label(self.update_banner, "", size=11, weight="extrabold",
+                                           color=T.NAVY, justify="left")
+        self.update_banner_label.pack(anchor="w", padx=12, pady=(10, 4))
+        T.button(self.update_banner, "Обновить", lambda: self.show_update_dialog(self.update_manifest),
+                 variant="inverse", height=30, font_size=12).pack(fill="x", padx=12, pady=(0, 12))
+
         hints = ctk.CTkFrame(sidebar, fg_color="transparent")
         hints.pack(side="bottom", anchor="w", padx=26, pady=(0, 14))
+        self._sidebar_hints = hints
         for row, (keys, action) in enumerate([("Ctrl+G", "создать PDF"),
                                               ("Ctrl+P", "предпросмотр"),
                                               ("Ctrl+O", "открыть файл"),
@@ -1028,7 +1044,11 @@ class BarcodeApp:
         info = ctk.CTkFrame(top, fg_color="transparent")
         info.pack(side="left", fill="x", expand=True)
         T.title(info, APP_NAME, size=26).pack(anchor="w")
-        T.chip(info, f"ВЕРСИЯ {__version__}", strong=True).pack(anchor="w", pady=(6, 10))
+        version_row = ctk.CTkFrame(info, fg_color="transparent")
+        version_row.pack(anchor="w", pady=(6, 10))
+        T.chip(version_row, f"ВЕРСИЯ {__version__}", strong=True).pack(side="left")
+        T.button(version_row, "Проверить обновления", lambda: self.check_updates_manual(window),
+                 height=28, font_size=12).pack(side="left", padx=(8, 0))
         T.label(info, "Этикетки со штрихкодами и QR-паспорта:\nPDF, ZIP и печать на принтер",
                 size=13, color=T.TEXT_2, justify="left").pack(anchor="w")
 
@@ -1053,6 +1073,171 @@ class BarcodeApp:
         T.Tooltip(copy_btn, "Пригодится, если нужно сообщить о проблеме")
         T.button(buttons, "Закрыть", window.destroy, variant="ghost", height=38
                  ).pack(side="right")
+
+    # ===== ОБНОВЛЕНИЯ =====
+    def _run_in_background(self, work, done):
+        """work() — в фоновом потоке, done(result, error) — потом в основном."""
+        box = queue.Queue()
+
+        def target():
+            try:
+                box.put((work(), None))
+            except Exception as e:
+                box.put((None, e))
+
+        def poll():
+            try:
+                result, error = box.get_nowait()
+            except queue.Empty:
+                self.root.after(100, poll)
+                return
+            done(result, error)
+
+        threading.Thread(target=target, daemon=True).start()
+        self.root.after(100, poll)
+
+    def check_updates_background(self):
+        def done(manifest, error):
+            if error:
+                logger.info(f"Проверка обновлений не удалась: {error}")
+            elif manifest:
+                self._show_update_banner(manifest)
+        self._run_in_background(lambda: updater.check_for_update(__version__), done)
+
+    def check_updates_manual(self, parent=None):
+        self.set_status("Проверяем обновления...", 'warning')
+
+        def done(manifest, error):
+            if error:
+                self.set_status("Не удалось проверить обновления", 'error')
+                messagebox.showwarning("Обновления", str(error), parent=parent)
+            elif manifest:
+                self._show_update_banner(manifest)
+                if parent is not None and parent.winfo_exists():
+                    parent.destroy()
+                self.show_update_dialog(manifest)
+            else:
+                self.set_status("У вас последняя версия", 'success')
+                messagebox.showinfo("Обновления", f"У вас последняя версия — {__version__}",
+                                    parent=parent)
+        self._run_in_background(lambda: updater.check_for_update(__version__), done)
+
+    def _show_update_banner(self, manifest):
+        self.update_manifest = manifest
+        self.update_banner_label.configure(text=f"ДОСТУПНА ВЕРСИЯ {manifest['version']}")
+        # before=подсказки — плашка встаёт сразу над «О программе»
+        self.update_banner.pack(side="bottom", fill="x", padx=14, pady=(0, 10),
+                                before=self._sidebar_hints)
+        logger.info(f"Доступно обновление {manifest['version']}")
+
+    @error_handler
+    def show_update_dialog(self, manifest):
+        if not manifest:
+            return
+        window = self._dialog("Обновление", 560, 480)
+        window.grid_columnconfigure(0, weight=1)
+        window.grid_rowconfigure(2, weight=1)
+
+        head = ctk.CTkFrame(window, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=28, pady=(26, 0))
+        T.overline(head, "Обновление").pack(anchor="w")
+        T.title(head, f"Версия {manifest['version']}", size=24).pack(anchor="w")
+        T.chip(head, f"{__version__}  →  {manifest['version']}").pack(anchor="w", pady=(6, 0))
+
+        T.field_label(window, "Что нового").grid(row=1, column=0, sticky="w", padx=28, pady=(16, 4))
+        notes = ctk.CTkTextbox(window, fg_color=T.SURFACE, border_width=1, border_color=T.BORDER,
+                               corner_radius=12, font=T.font(13), wrap="word", border_spacing=10)
+        notes.grid(row=2, column=0, sticky="nsew", padx=28)
+        notes.insert("1.0", manifest.get("notes") or "Исправления и улучшения.")
+        notes.configure(state="disabled")
+
+        progress = ctk.CTkProgressBar(window, height=8, corner_radius=4)
+        progress.set(0)
+        status = T.label(window, "Настройки и список кодов сохранятся. Программа перезапустится сама.",
+                         size=12, color=T.TEXT_2)
+        status.grid(row=4, column=0, sticky="w", padx=28, pady=(10, 0))
+
+        buttons = ctk.CTkFrame(window, fg_color="transparent")
+        buttons.grid(row=5, column=0, sticky="ew", padx=28, pady=(14, 22))
+        cancel = threading.Event()
+        state = {"busy": False}
+
+        def close():
+            cancel.set()
+            window.destroy()
+
+        later_btn = T.button(buttons, "Позже", close, variant="ghost", height=44)
+        later_btn.pack(side="right")
+        update_btn = T.button(buttons, "Обновить сейчас", None, variant="primary", height=44, width=230)
+        update_btn.pack(side="right", padx=(0, 8))
+        window.protocol("WM_DELETE_WINDOW", close)
+
+        def start():
+            if state["busy"]:
+                return
+            if not updater.can_self_update():
+                messagebox.showinfo(
+                    "Обновление",
+                    "Автоматически обновляется только программа, установленная через "
+                    "установщик. Скачайте новую версию вручную.", parent=window)
+                return
+            if self._job is not None:
+                messagebox.showwarning("Обновление", "Дождитесь окончания генерации PDF", parent=window)
+                return
+            state["busy"] = True
+            update_btn.configure(state="disabled", text="СКАЧИВАЕМ…")
+            later_btn.configure(text="Отмена")
+            progress.grid(row=3, column=0, sticky="ew", padx=28, pady=(14, 0))
+            box = queue.Queue()
+
+            def on_progress(done, total):
+                box.put(("progress", done / total if total else 0))
+
+            def work():
+                try:
+                    box.put(("done", updater.download(manifest, on_progress, cancel)))
+                except Exception as e:
+                    box.put(("error", e))
+
+            def poll():
+                if not window.winfo_exists():
+                    return
+                try:
+                    while True:
+                        kind, data = box.get_nowait()
+                        if kind == "progress":
+                            progress.set(data)
+                            status.configure(text=f"Скачано {int(data * 100)}%")
+                        elif kind == "error":
+                            state["busy"] = False
+                            update_btn.configure(state="normal", text="ПОВТОРИТЬ")
+                            later_btn.configure(text="Позже")
+                            status.configure(text=str(data), text_color=T.ERROR)
+                            return
+                        else:
+                            self._install_update(data, status)
+                            return
+                except queue.Empty:
+                    pass
+                window.after(100, poll)
+
+            threading.Thread(target=work, daemon=True).start()
+            window.after(100, poll)
+
+        update_btn.configure(command=start)
+
+    def _install_update(self, installer_path, status_label):
+        """Сохраняет всё и передаёт управление установщику."""
+        status_label.configure(text="Устанавливаем… программа перезапустится через несколько секунд",
+                               text_color=T.TEXT_2)
+        self.save_current_settings()
+        codes = self.text_codes.get("1.0", "end").strip()
+        if codes:
+            # После перезапуска программа предложит восстановить список
+            self.settings.save_temp_codes(codes)
+        logger.info(f"Запуск установщика обновления: {installer_path}")
+        updater.launch_installer(installer_path)
+        self.root.after(400, self.root.destroy)
 
     @error_handler
     def show_preview_window(self):

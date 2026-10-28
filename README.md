@@ -68,6 +68,30 @@ build.bat
 Результат: `dist/barcodeGen.exe` (Windows) или `dist/barcodeGen` (Linux).
 Шрифт Montserrat из папки `fonts/` встраивается в exe автоматически.
 
+## Обновления у пользователей
+
+Установленная программа при запуске проверяет, нет ли новой версии, и показывает
+в сайдбаре плашку «Доступна версия …». По кнопке «Обновить» установщик
+скачивается, проверяется по SHA-256 и ставится тихо поверх; программа
+перезапускается сама, настройки и список кодов сохраняются. Проверить вручную —
+«О программе» → «Проверить обновления».
+
+Обновления берутся из публичного репозитория
+[`Zikizik15/barcodeGen-releases`](https://github.com/Zikizik15/barcodeGen-releases)
+(только установщики; исходный код остаётся приватным) — см. `RELEASES_REPO`
+в `updater.py`.
+
+Как выпустить обновление:
+
+1. Поменять версию в `version.py` и `pyproject.toml`.
+2. `build_installer.bat`
+3. `python publish_update.py --notes "Что нового"` — создаст `dist\installer\latest.json`.
+4. В репозитории `barcodeGen-releases` → Releases → **Draft a new release**:
+   тег `v<версия>`, приложить установщик и `latest.json`, **Publish release**.
+
+Для офиса без интернета источник можно переопределить переменной окружения
+`BARCODEGEN_UPDATE_URL` — путём к `latest.json` в сетевой папке.
+
 ## Тесты
 
 ```bash
@@ -122,6 +146,8 @@ BarcodeGen/
 ├── build.sh / build.bat     # Скрипты PyInstaller (один exe)
 ├── build_installer.bat      # Сборка установщика
 ├── installer.iss            # Скрипт установщика Inno Setup
+├── updater.py               # Проверка и установка обновлений
+├── publish_update.py        # Подготовка latest.json для выпуска обновления
 ├── fonts/                   # Шрифт Montserrat (лицензия OFL)
 ├── gui/
 │   ├── theme.py             # Дизайн-система: палитра, шрифты, иконки, готовые виджеты
