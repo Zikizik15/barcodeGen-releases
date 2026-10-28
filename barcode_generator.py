@@ -27,6 +27,8 @@ try:
 except ImportError:
     QRCODE_AVAILABLE = False
 
+MM = 2.83465  # пунктов PDF в одном миллиметре
+
 REPORTLAB_AVAILABLE = False
 try:
     from reportlab.pdfgen import canvas
@@ -177,6 +179,83 @@ class BarcodeGenerator:
     def generate_barcode_image(self, code, temp_dir, force_qr=False):
         return self.generate_single_barcode(code, as_bytes=False, temp_dir=temp_dir, force_qr=force_qr)
 
+    # ========== РАСКЛАДКА СТРАНИЦ ==========
+    # Одна раскладка на всё: по ней рисуется и PDF (draw_pdf), и картинка
+    # предпросмотра (render_page_image) — поэтому они не расходятся.
+    # Координаты в миллиметрах от левого верхнего угла страницы.
+    # Операции: ("image", путь, x, y, w, h, сохранять_пропорции)
+    #           ("text", текст, центр_x, центр_y, кегль_pt)
+    #           ("rect", x, y, w, h)
+
+    def layout_pages(self, barcode_images, metadata=None, use_template=None, keep_aspect=False):
+        """Возвращает (ширина_мм, высота_мм, [страница = [операции]])."""
+        if use_template is None:
+            use_template = self.template_active()
+        try:
+            per_page = int(self.labels_per_page)
+        except (TypeError, ValueError):
+            per_page = 1
+        if per_page not in GRID_MAP:
+            per_page = 1
+        cols, rows = GRID_MAP[per_page]
+        template = self.settings.get("label_template") if use_template else None
+        meta_all = metadata if metadata is not None else (self.settings.get("codes_metadata", {}) or {})
+
+        if template and per_page == 1:
+            # Одна этикетка по шаблону: страница = размер шаблона, поля задаёт сам шаблон
+            page_w = float(template.get("label_width", self.label_width))
+            page_h = float(template.get("label_height", self.label_height))
+            cells = [(0.0, 0.0, page_w, page_h)]
+        else:
+            page_w, page_h = self.label_width, self.label_height
+            mt, mb, ml, mr = self.margins
+            cell_w = (page_w - ml - mr) / cols
+            cell_h = (page_h - mt - mb) / rows
+            cells = [(ml + (i % cols) * cell_w, mt + (i // cols) * cell_h, cell_w, cell_h)
+                     for i in range(per_page)]
+
+        pages = []
+        for i, (code, img_path) in enumerate(barcode_images):
+            if i % per_page == 0:
+                pages.append([])
+            ops = pages[-1]
+            x, y, w, h = cells[i % per_page]
+            if self.show_border:
+                ops.append(("rect", x, y, w, h))
+            if template:
+                ops.extend(self._template_ops(template, code, img_path, (x, y, w, h),
+                                              meta_all.get(code, {}), keep_aspect))
+            else:
+                img_w, img_h = w * 0.98, h * 0.95
+                ops.append(("image", img_path, x + (w - img_w) / 2, y + (h - img_h) / 2,
+                            img_w, img_h, keep_aspect))
+        return page_w, page_h, pages
+
+    @staticmethod
+    def _template_ops(template, code, img_path, cell, meta, keep_aspect):
+        """Элементы шаблона, вписанные в ячейку с сохранением пропорций шаблона."""
+        cx, cy, cw, ch = cell
+        tw = float(template.get("label_width", cw)) or cw
+        th = float(template.get("label_height", ch)) or ch
+        k = min(cw / tw, ch / th)
+        ox, oy = cx + (cw - tw * k) / 2, cy + (ch - th * k) / 2
+        ops = []
+        for el in template.get("elements", []):
+            x, y = ox + el["x"] * k, oy + el["y"] * k
+            w, h = el["w"] * k, el["h"] * k
+            if el["type"] == "barcode":
+                ops.append(("image", img_path, x, y, w, h, keep_aspect))
+            elif el["type"] == "image":
+                src = el.get("src", "")
+                if src and os.path.exists(src):
+                    ops.append(("image", src, x, y, w, h, True))
+            elif el["type"] == "text":
+                text = str(el.get("text", "")).replace("{code}", code)
+                for key, value in meta.items():
+                    text = text.replace("{" + key + "}", str(value))
+                ops.append(("text", text, x + w / 2, y + h / 2, el.get("font_size", 10) * k))
+        return ops
+
     def create_pdf(self, filename, barcode_images, metadata=None, use_template=None,
                    keep_aspect=False):
         """metadata — {код: {name, price, ...}} для плейсхолдеров шаблона.
@@ -184,112 +263,89 @@ class BarcodeGenerator:
         keep_aspect — не растягивать картинку (нужно для QR-кодов)."""
         if not REPORTLAB_AVAILABLE:
             raise ImportError("reportlab не установлен")
-        if use_template is None:
-            use_template = self.template_active()
-        if use_template:
-            self._create_pdf_from_template(filename, barcode_images,
-                                           self.settings.get("label_template"), metadata)
-        else:
-            self._create_pdf_default(filename, barcode_images, keep_aspect)
+        page_w, page_h, pages = self.layout_pages(barcode_images, metadata, use_template, keep_aspect)
+        self.draw_pdf(filename, page_w, page_h, pages)
 
-    def _create_pdf_default(self, filename, barcode_images, keep_aspect=False):
-        scale = 2.83465
-        page_w, page_h = self.label_width * scale, self.label_height * scale
-        mt, mb, ml, mr = [m * scale for m in self.margins]
-        labels_per_page = self.labels_per_page
-        cols, rows = GRID_MAP.get(labels_per_page, (1, 1))
-        c = canvas.Canvas(filename, pagesize=(page_w, page_h))
-        for i, (code, img_path) in enumerate(barcode_images):
-            if labels_per_page > 1:
-                pos_in_page = i % labels_per_page
-                if pos_in_page == 0 and i != 0:
-                    c.showPage()
-                col, row = pos_in_page % cols, pos_in_page // cols
-                cell_w, cell_h = (page_w - ml - mr) / cols, (page_h - mt - mb) / rows
-                x = ml + col * cell_w
-                y = page_h - mt - (row + 1) * cell_h
-                w, h = cell_w, cell_h
-            else:
-                if i > 0:
-                    c.showPage()
-                x, y = ml, mb
-                w, h = page_w - ml - mr, page_h - mt - mb
-
-            if self.show_border:
-                c.rect(x, y, w, h, stroke=1, fill=0)
-            try:
-                img = ImageReader(img_path)
-                img_w, img_h = w * 0.98, h * 0.95
-                img_x = x + (w - img_w) / 2
-                img_y = y + (h - img_h) / 2
-                c.drawImage(img, img_x, img_y, width=img_w, height=img_h,
-                            preserveAspectRatio=keep_aspect, anchor='c')
-            except Exception as e:
-                logger.error(f"Ошибка вставки: {e}")
-        c.save()
-
-    def _create_pdf_from_template(self, filename, barcode_images, template, metadata=None):
-        scale = 2.83465
-        label_w = template.get("label_width", self.label_width)
-        label_h = template.get("label_height", self.label_height)
-        page_w, page_h = label_w * scale, label_h * scale
-        elements = template.get("elements", [])
-
-        font_name = "Helvetica"
+    @staticmethod
+    def _pdf_font():
+        """Шрифт с кириллицей для текста шаблона (Helvetica её не умеет)."""
         font_path = find_font_path()
         if font_path:
             try:
                 from reportlab.pdfbase import pdfmetrics
                 from reportlab.pdfbase.ttfonts import TTFont
-                pdfmetrics.registerFont(TTFont("CustomFont", font_path))
-                font_name = "CustomFont"
+                if "CustomFont" not in pdfmetrics.getRegisteredFontNames():
+                    pdfmetrics.registerFont(TTFont("CustomFont", font_path))
+                return "CustomFont"
             except Exception:
                 pass
+        return "Helvetica"
 
-        c = canvas.Canvas(filename, pagesize=(page_w, page_h))
-        meta_all = metadata if metadata is not None else (self.settings.get("codes_metadata", {}) or {})
-
-        for i, (code, img_path) in enumerate(barcode_images):
-            if i > 0:
+    def draw_pdf(self, filename, page_w, page_h, pages):
+        c = canvas.Canvas(filename, pagesize=(page_w * MM, page_h * MM))
+        font_name = self._pdf_font()
+        images = {}
+        for n, ops in enumerate(pages):
+            if n:
                 c.showPage()
-            for el in elements:
-                x = el["x"] * scale
-                y_top = el["y"] * scale
-                w = el["w"] * scale
-                h = el["h"] * scale
-                y = page_h - y_top - h
-
-                if el["type"] == "barcode":
-                    try:
-                        img = ImageReader(img_path)
-                        if self.use_qr:
-                            c.drawImage(img, x, y, width=w, height=h,
-                                        preserveAspectRatio=True, anchor='c')
-                        else:
-                            c.drawImage(img, x, y, width=w, height=h)
-                    except Exception as e:
-                        logger.error(f"Ошибка вставки штрихкода: {e}")
-                elif el["type"] == "image":
-                    src = el.get("src", "")
-                    if src and os.path.exists(src):
-                        try:
-                            img_el = ImageReader(src)
-                            c.drawImage(img_el, x, y, width=w, height=h,
-                                        preserveAspectRatio=True, anchor='c', mask='auto')
-                        except Exception as e:
-                            logger.error(f"Ошибка вставки картинки: {e}")
-                elif el["type"] == "text":
-                    text = str(el.get("text", "")).replace("{code}", code)
-                    meta = meta_all.get(code, {})
-                    for key, value in meta.items():
-                        text = text.replace("{" + key + "}", str(value))
-                    font_size = el.get("font_size", 10)
-                    try:
-                        c.setFont(font_name, font_size)
-                        c.drawCentredString(x + w / 2, y + h / 2 - font_size * 0.35, text)
-                    except Exception:
-                        pass
+            for op in ops:
+                try:
+                    if op[0] == "image":
+                        _, path, x, y, w, h, keep = op
+                        if path not in images:
+                            images[path] = ImageReader(path)
+                        c.drawImage(images[path], x * MM, (page_h - y - h) * MM, width=w * MM,
+                                    height=h * MM, preserveAspectRatio=keep, anchor='c', mask='auto')
+                    elif op[0] == "text":
+                        _, text, cx, cy, size = op
+                        c.setFont(font_name, size)
+                        c.drawCentredString(cx * MM, (page_h - cy) * MM - size * 0.35, text)
+                    elif op[0] == "rect":
+                        _, x, y, w, h = op
+                        c.rect(x * MM, (page_h - y - h) * MM, w * MM, h * MM, stroke=1, fill=0)
+                except Exception as e:
+                    logger.error(f"Ошибка отрисовки элемента {op[0]}: {e}")
         c.save()
+
+    @staticmethod
+    def render_page_image(page_w, page_h, ops, px_per_mm=8.0):
+        """Та же страница, что в PDF, но картинкой — для предпросмотра."""
+        from PIL import ImageDraw, ImageFont
+        k = px_per_mm
+        page = Image.new("RGB", (max(1, round(page_w * k)), max(1, round(page_h * k))), "white")
+        draw = ImageDraw.Draw(page)
+        font_path = find_font_path()
+        for op in ops:
+            try:
+                if op[0] == "image":
+                    _, path, x, y, w, h, keep = op
+                    src = Image.open(path).convert("RGBA")
+                    bw, bh = max(1, round(w * k)), max(1, round(h * k))
+                    if keep:
+                        s = min(bw / src.width, bh / src.height)
+                        fit = src.resize((max(1, round(src.width * s)), max(1, round(src.height * s))),
+                                         Image.LANCZOS)
+                        px, py = round(x * k + (bw - fit.width) / 2), round(y * k + (bh - fit.height) / 2)
+                    else:
+                        fit = src.resize((bw, bh), Image.LANCZOS)
+                        px, py = round(x * k), round(y * k)
+                    page.paste(fit, (px, py), fit)
+                elif op[0] == "text":
+                    _, text, cx, cy, size = op
+                    size_px = max(4, round(size / MM * k))
+                    try:
+                        fnt = ImageFont.truetype(font_path, size_px) if font_path else ImageFont.load_default()
+                    except Exception:
+                        fnt = ImageFont.load_default()
+                    baseline = (cy + size * 0.35 / MM) * k
+                    draw.text((cx * k, baseline), text, fill="black", font=fnt, anchor="ms")
+                elif op[0] == "rect":
+                    _, x, y, w, h = op
+                    draw.rectangle([x * k, y * k, (x + w) * k, (y + h) * k], outline="black",
+                                   width=max(1, round(k * 0.35)))
+            except Exception as e:
+                logger.error(f"Предпросмотр: ошибка отрисовки {op[0]}: {e}")
+        return page
 
     def generate_zip_archive(self, codes, filename):
         import zipfile

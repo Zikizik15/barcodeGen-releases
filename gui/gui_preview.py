@@ -1,18 +1,26 @@
 # gui/gui_preview.py - Окно предпросмотра печати (CustomTkinter)
 #
-# Постраничный рендер этикеток, навигация, зум, отправка на печать.
-# Страница рисуется белой «бумагой» на тёмном фоне.
+# Предпросмотр рисуется по той же раскладке страниц, что и PDF
+# (BarcodeGenerator.layout_pages), поэтому показывает ровно то, что будет
+# напечатано — с шаблоном, сеткой и полями. Штрихкоды готовятся в фоновом
+# потоке: окно открывается сразу, страницы появляются по мере готовности.
+# «Печать» отправляет на принтер настоящий PDF.
 
 import os
-import io
+import queue
+import tempfile
+import threading
 import tkinter as tk
 from tkinter import messagebox
 
 import customtkinter as ctk
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageTk
 
 from . import theme as T
-from utils import GRID_MAP, validate_code
+from logger import logger
+from utils import validate_code, print_pdf
+
+MAX_PAGE_PX = (1600, 1200)   # потолок размера картинки страницы
 
 
 class PreviewWindow:
@@ -22,35 +30,24 @@ class PreviewWindow:
         self.parent = parent
         self.codes = codes
         self.app = app
-        self.window = None
-        self.images = []
+        self.gen = app.generator
+        self.metadata = dict(getattr(app, "codes_metadata", {}) or {})
+        self.preview_images = []    # PIL-картинки страниц
+        self.images = []            # ссылки на PhotoImage (иначе Tk их выбросит)
+        self.barcode_images = []    # [(код, путь к картинке)] — для печати
+        self.skipped = []
         self.current_page = 0
-        self.total_pages = 0
         self.zoom_level = 1.0
-        self.preview_images = []
+        self.ready = False
 
-        # Параметры страницы
-        try:
-            self.page_width_mm = float(self.app.label_width.get())
-            self.page_height_mm = float(self.app.label_height.get())
-            self.margins = [
-                float(self.app.margin_top.get()),
-                float(self.app.margin_bottom.get()),
-                float(self.app.margin_left.get()),
-                float(self.app.margin_right.get())
-            ]
-            self.labels_per_page = self.app.labels_per_page.get()
-            self.show_border = self.app.show_border.get()
-        except Exception:
-            messagebox.showerror("Ошибка", "Некорректные размеры этикетки")
-            self.window = None
-            return
+        self.queue = queue.Queue()
+        self.cancel = threading.Event()
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
 
         self.create_window()
-        self.generate_preview_pages()
-
-        if self.preview_images:
-            self.show_page(0)
+        self.worker = threading.Thread(target=self._worker, daemon=True)
+        self.worker.start()
+        self.window.after(50, self._poll)
 
     # ========== ОКНО ==========
     def create_window(self):
@@ -59,7 +56,7 @@ class PreviewWindow:
         self.window.grid_columnconfigure(0, weight=1)
         self.window.grid_rowconfigure(1, weight=1)
 
-        # ----- Заголовок и управление -----
+        # ----- Заголовок -----
         head = ctk.CTkFrame(self.window, fg_color="transparent")
         head.grid(row=0, column=0, sticky="ew", padx=28, pady=(24, 16))
 
@@ -68,15 +65,21 @@ class PreviewWindow:
         T.overline(titles, "Предпросмотр").pack(anchor="w")
         T.title(titles, "Как это будет напечатано", size=24).pack(anchor="w")
 
-        info = [f"{self.page_width_mm:g}×{self.page_height_mm:g} мм",
-                f"поля {self.margins[0]:g} / {self.margins[1]:g} / {self.margins[2]:g} / {self.margins[3]:g} мм",
-                f"{self.labels_per_page} на странице"]
-        if self.show_border:
+        g = self.gen
+        if g.template_active():
+            mode = "по шаблону этикетки"
+        else:
+            mode = (f"поля {g.margins[0]:g} / {g.margins[1]:g} / "
+                    f"{g.margins[2]:g} / {g.margins[3]:g} мм")
+        info = [mode, f"{g.labels_per_page} на странице"]
+        if g.show_border:
             info.append("с рамкой")
-        T.label(titles, "  ·  ".join(info), size=13, color=T.TEXT_2).pack(anchor="w", pady=(2, 0))
+        self.info_label = T.label(titles, "  ·  ".join(info), size=13, color=T.TEXT_2)
+        self.info_label.pack(anchor="w", pady=(2, 0))
 
-        T.button(head, "Печать", self.print_page, variant="primary", height=44, width=130
-                 ).pack(side="right")
+        self.print_button = T.button(head, "Печать", self.print_page, variant="primary",
+                                     height=44, width=130, state="disabled")
+        self.print_button.pack(side="right")
 
         # ----- Холст -----
         canvas_card = T.card(self.window, fg_color=T.CANVAS_BG)
@@ -96,7 +99,7 @@ class PreviewWindow:
         next_btn.pack(side="left", padx=(8, 0))
         T.Tooltip(next_btn, "Следующая страница (→)")
 
-        self.page_info_label = T.label(bar, "Страница 1 из 1", size=13)
+        self.page_info_label = T.label(bar, "Подготовка…", size=13)
         self.page_info_label.pack(side="left", padx=14)
 
         self.total_labels_label = T.label(bar, "", size=12, color=T.TEXT_3)
@@ -110,8 +113,6 @@ class PreviewWindow:
         T.button(bar, "−", self.zoom_out, height=36, width=40, font_size=16
                  ).pack(side="right", padx=(0, 4))
 
-        self.status_label = T.label(bar, "", size=12, color=T.TEXT_3)
-
         # ----- Обработка -----
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
         self.window.bind('<Escape>', lambda e: self.on_close())
@@ -123,148 +124,98 @@ class PreviewWindow:
         self.window.bind('<Control-0>', lambda e: self.zoom_reset())
         self.canvas.bind('<Configure>', self.on_resize)
 
-    def _set_status(self, text, color=T.TEXT_3):
-        self.status_label.configure(text=text, text_color=color)
+    # ========== ФОНОВАЯ ПОДГОТОВКА ==========
+    def _worker(self):
+        """Генерирует штрихкоды и рисует страницы. К Tk не обращается."""
+        q = self.queue
+        try:
+            total = len(self.codes)
+            for i, code in enumerate(self.codes, 1):
+                if self.cancel.is_set():
+                    return
+                valid, msg = validate_code(code, self.gen.barcode_type)
+                path = self.gen.generate_barcode_image(code, self.temp.name) if valid else None
+                if path:
+                    self.barcode_images.append((code, path))
+                else:
+                    self.skipped.append(code)
+                q.put(("progress", (i, total)))
 
-    # ========== ГЕНЕРАЦИЯ СТРАНИЦ ==========
-    def generate_preview_pages(self):
-        self.app.set_status("Генерация предпросмотра...", 'warning')
+            page_w, page_h, pages = self.gen.layout_pages(self.barcode_images, self.metadata)
+            k = min(8.0, MAX_PAGE_PX[0] / page_w, MAX_PAGE_PX[1] / page_h)
+            q.put(("layout", (page_w, page_h, len(pages))))
+            for ops in pages:
+                if self.cancel.is_set():
+                    return
+                q.put(("page", self.gen.render_page_image(page_w, page_h, ops, k)))
+            q.put(("done", None))
+        except Exception as e:
+            logger.error(f"Ошибка предпросмотра: {e}")
+            q.put(("error", e))
 
-        codes = self.codes
-        if not codes:
-            self._set_status("Нет кодов для отображения", T.ERROR)
+    def _poll(self):
+        if self.cancel.is_set():
             return
+        try:
+            while True:
+                kind, data = self.queue.get_nowait()
+                if kind == "progress":
+                    i, total = data
+                    self._show_message(f"Готовим штрихкоды: {i} из {total}")
+                    self.page_info_label.configure(text=f"Подготовка… {i} из {total}")
+                elif kind == "layout":
+                    w, h, self.total_pages = data
+                    self.info_label.configure(text=f"{w:g}×{h:g} мм  ·  " + self.info_label.cget("text"))
+                    if not self.total_pages:
+                        self._show_message("Нет кодов, которые можно напечатать")
+                elif kind == "page":
+                    self.preview_images.append(data)
+                    if len(self.preview_images) == 1:
+                        self.show_page(0)
+                    else:
+                        self._update_page_label()
+                elif kind == "done":
+                    self._on_ready()
+                elif kind == "error":
+                    self._show_message(f"Ошибка: {data}")
+                    self.app.set_status("Ошибка предпросмотра", 'error')
+                    return
+        except queue.Empty:
+            pass
+        self.window.after(50, self._poll)
 
-        labels_per_page = self.labels_per_page
-        total_labels = len(codes)
-        self.total_pages = (total_labels + labels_per_page - 1) // labels_per_page
-        self.total_labels_label.configure(text=f"·  всего этикеток: {total_labels}")
-
-        self.preview_images = []
-
-        for page_num in range(self.total_pages):
-            start_idx = page_num * labels_per_page
-            end_idx = min(start_idx + labels_per_page, total_labels)
-            page_codes = codes[start_idx:end_idx]
-
-            img = self.create_page_image(page_codes, page_num + 1, self.total_pages)
-            if img:
-                self.preview_images.append(img)
-
+    def _on_ready(self):
+        self.ready = True
+        done = len(self.barcode_images)
+        text = f"·  этикеток: {done}"
+        if self.skipped:
+            text += f"  ·  пропущено с ошибками: {len(self.skipped)}"
+            self.total_labels_label.configure(text_color=T.ERROR)
+        self.total_labels_label.configure(text=text)
+        if done:
+            self.print_button.configure(state="normal")
         self.app.set_status("Предпросмотр готов", 'success')
 
-    def create_page_image(self, page_codes, page_num, total_pages):
-        try:
-            # Рендерим крупно, чтобы на экране страница была чёткой
-            scale = 8.0
-            page_w = int(self.page_width_mm * scale)
-            page_h = int(self.page_height_mm * scale)
-
-            if page_w > 1600 or page_h > 1200:
-                scale = min(1600 / self.page_width_mm, 1200 / self.page_height_mm)
-                page_w = int(self.page_width_mm * scale)
-                page_h = int(self.page_height_mm * scale)
-
-            img = Image.new('RGB', (page_w, page_h), 'white')
-            draw = ImageDraw.Draw(img)
-
-            mt = int(self.margins[0] * scale)
-            mb = int(self.margins[1] * scale)
-            ml = int(self.margins[2] * scale)
-            mr = int(self.margins[3] * scale)
-
-            available_w = page_w - ml - mr
-            available_h = page_h - mt - mb
-
-            labels_per_page = self.labels_per_page
-            if labels_per_page > 1:
-                cols, rows = self.get_grid(labels_per_page)
-                label_w = available_w / cols
-                label_h = available_h / rows
-            else:
-                cols, rows = 1, 1
-                label_w = available_w
-                label_h = available_h
-
-            for idx, code in enumerate(page_codes):
-                if idx >= labels_per_page:
-                    break
-
-                col = idx % cols
-                row = idx // cols
-
-                x = ml + col * label_w
-                y = mt + row * label_h
-
-                if self.show_border:
-                    draw.rectangle([x, y, x + label_w, y + label_h],
-                                   outline='#cccccc', width=2)
-
-                valid, _ = validate_code(code, self.app.barcode_type.get())
-
-                if not valid:
-                    self._draw_error(draw, x, y, label_w, label_h, code)
-                    continue
-
-                try:
-                    img_bytes = self.app.generator.generate_barcode_to_bytes(code)
-                    if img_bytes:
-                        img_bytes.seek(0)
-                        barcode_pil = Image.open(img_bytes)
-
-                        barcode_w = int(label_w * 0.85)
-                        barcode_h = int(label_h * 0.80)
-                        barcode_resized = barcode_pil.resize(
-                            (barcode_w, barcode_h), Image.Resampling.LANCZOS
-                        )
-
-                        bx = x + (label_w - barcode_w) / 2
-                        by = y + (label_h - barcode_h) / 2
-                        img.paste(barcode_resized, (int(bx), int(by)))
-                except Exception:
-                    self._draw_error(draw, x, y, label_w, label_h, code)
-
-            if self.show_border:
-                draw.rectangle([0, 0, page_w - 1, page_h - 1],
-                               outline='#999999', width=2)
-
-            return img
-
-        except Exception as e:
-            print(f"Ошибка создания страницы: {e}")
-            return None
-
-    @staticmethod
-    def _draw_error(draw, x, y, w, h, code):
-        """Красная плашка на месте кода, который не удалось сгенерировать."""
-        draw.rectangle([x + 5, y + 5, x + w - 5, y + h - 5],
-                       outline='#ff6b6b', fill='#fff5f5', width=3)
-        try:
-            from PIL import ImageFont
-            fnt = ImageFont.load_default(size=max(10, int(h * 0.08)))
-        except Exception:
-            fnt = None  # Pillow < 10.1 — шрифт по умолчанию без размера
-        draw.text((x + w / 2, y + h / 2), f"Ошибка: {code[:15]}",
-                  fill='#d00000', anchor='mm', font=fnt)
-
-    def get_grid(self, labels_per_page):
-        return GRID_MAP.get(labels_per_page, (2, 2))
+    def _show_message(self, text):
+        """Сообщение по центру холста, пока страниц ещё нет."""
+        if self.preview_images:
+            return
+        self.canvas.delete("all")
+        self.canvas.create_text(max(self.canvas.winfo_width(), 200) / 2,
+                                max(self.canvas.winfo_height(), 200) / 2,
+                                text=text, fill=T.TEXT_2, font=(T.FONT_UI, 13))
 
     # ========== НАВИГАЦИЯ ==========
+    def _update_page_label(self):
+        total = getattr(self, "total_pages", len(self.preview_images)) or len(self.preview_images)
+        self.page_info_label.configure(text=f"Страница {self.current_page + 1} из {total}")
+
     def show_page(self, page_num):
         if not self.preview_images:
             return
-
-        if page_num < 0:
-            page_num = 0
-        elif page_num >= len(self.preview_images):
-            page_num = len(self.preview_images) - 1
-
+        page_num = max(0, min(page_num, len(self.preview_images) - 1))
         self.current_page = page_num
-        self.page_info_label.configure(
-            text=f"Страница {page_num + 1} из {len(self.preview_images)}"
-        )
-
+        self._update_page_label()
         self.display_image(self.preview_images[page_num])
 
     def display_image(self, img):
@@ -272,7 +223,6 @@ class PreviewWindow:
 
         canvas_w = self.canvas.winfo_width()
         canvas_h = self.canvas.winfo_height()
-
         if canvas_w < 10 or canvas_h < 10:
             canvas_w, canvas_h = 800, 560
 
@@ -305,18 +255,15 @@ class PreviewWindow:
 
     def zoom_in(self):
         self.zoom_level = min(self.zoom_level * 1.2, 3.0)
-        if self.preview_images:
-            self.display_image(self.preview_images[self.current_page])
+        self.show_page(self.current_page)
 
     def zoom_out(self):
         self.zoom_level = max(self.zoom_level / 1.2, 0.2)
-        if self.preview_images:
-            self.display_image(self.preview_images[self.current_page])
+        self.show_page(self.current_page)
 
     def zoom_reset(self):
         self.zoom_level = 1.0
-        if self.preview_images:
-            self.display_image(self.preview_images[self.current_page])
+        self.show_page(self.current_page)
 
     def on_resize(self, event):
         if self.preview_images:
@@ -324,59 +271,45 @@ class PreviewWindow:
 
     # ========== ПЕЧАТЬ ==========
     def print_page(self):
-        if not self.preview_images:
-            messagebox.showwarning("Внимание", "Нет страниц для печати")
+        """Собирает настоящий PDF из тех же картинок и отправляет на принтер."""
+        if not self.ready or not self.barcode_images:
             return
+        self.print_button.configure(state="disabled", text="ГОТОВИМ…")
+        result = queue.Queue()
+        # Не в папке предпросмотра: окно могут закрыть раньше, чем
+        # программа печати успеет прочитать файл
+        fd, pdf_path = tempfile.mkstemp(prefix="barcodegen_print_", suffix=".pdf")
+        os.close(fd)
 
-        try:
-            import tempfile
-            import subprocess
-            import platform
-            from reportlab.pdfgen import canvas
-            from reportlab.lib.utils import ImageReader
+        def work():
+            try:
+                self.gen.create_pdf(pdf_path, self.barcode_images, metadata=self.metadata)
+                result.put(print_pdf(pdf_path))
+            except Exception as e:
+                result.put((False, str(e)))
 
-            temp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
-            temp_path = temp_file.name
-            temp_file.close()
-
-            c = canvas.Canvas(
-                temp_path,
-                pagesize=(self.page_width_mm * 2.83465, self.page_height_mm * 2.83465)
-            )
-
-            for img in self.preview_images:
-                img_bytes = io.BytesIO()
-                img.save(img_bytes, format='PNG')
-                img_bytes.seek(0)
-
-                img_reader = ImageReader(img_bytes)
-                c.drawImage(img_reader, 0, 0,
-                            width=self.page_width_mm * 2.83465,
-                            height=self.page_height_mm * 2.83465)
-                c.showPage()
-
-            c.save()
-
-            if platform.system() == "Windows":
-                os.startfile(temp_path, "print")
-            elif platform.system() == "Darwin":
-                subprocess.run(["lp", temp_path])
+        def wait():
+            try:
+                ok, message = result.get_nowait()
+            except queue.Empty:
+                self.window.after(100, wait)
+                return
+            self.print_button.configure(state="normal", text="ПЕЧАТЬ")
+            if ok:
+                self.app.set_status(message, 'success')
             else:
-                subprocess.run(["lp", temp_path])
+                self.app.set_status(f"Ошибка печати: {message[:40]}", 'error')
+                messagebox.showerror("Ошибка печати", f"Не удалось отправить на печать:\n{message}",
+                                     parent=self.window)
 
-            self.app.set_status("Отправлено на печать", 'success')
-
-        except ImportError:
-            messagebox.showwarning(
-                "Внимание",
-                "Для печати требуется установить reportlab:\npip install reportlab"
-            )
-        except Exception as e:
-            messagebox.showerror("Ошибка печати",
-                                 f"Не удалось отправить на печать:\n{str(e)}")
-            self.app.set_status(f"Ошибка печати: {str(e)[:30]}", 'error')
+        threading.Thread(target=work, daemon=True).start()
+        self.window.after(100, wait)
 
     def on_close(self):
+        self.cancel.set()
         self.images.clear()
         self.preview_images.clear()
         self.window.destroy()
+        # Временные картинки удаляем, когда фоновый поток точно закончит работу
+        worker, temp = self.worker, self.temp
+        threading.Thread(target=lambda: (worker.join(), temp.cleanup()), daemon=True).start()

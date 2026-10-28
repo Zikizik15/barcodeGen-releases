@@ -907,9 +907,9 @@ class BarcodeApp:
             return
 
         self.save_current_settings()
-        self.set_status("Генерация предпросмотра...", 'warning')
-        PreviewWindow(self.root, codes, self)
-        self.set_status("Предпросмотр открыт", 'success')
+        self.generator.load_settings()
+        self.set_status("Готовим предпросмотр...", 'warning')
+        PreviewWindow(self.root, codes, self)  # статус «готов» выставит само окно
         logger.info("Открыто окно предпросмотра печати")
 
     # ===== ГЕНЕРАЦИЯ PDF =====

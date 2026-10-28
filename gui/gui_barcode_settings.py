@@ -56,11 +56,13 @@ class BarcodeSettingsWindow(SettingsWindow):
             var.trace_add("write", self._on_manual_size)
 
         # ----- Отступы -----
-        margins = self.section("Поля", "Расстояние от края этикетки до штрихкода")
+        margins = self.section("Поля", "Расстояние от края этикетки до штрихкода. С шаблоном "
+                                       "поля учитываются, только если этикеток на странице больше одной")
         self.number_fields(margins, list(zip(("Сверху", "Снизу", "Слева", "Справа"), self.margins)))
 
         # ----- Раскладка -----
-        layout = self.section("Этикеток на одной странице PDF")
+        layout = self.section("Этикеток на одной странице PDF",
+                              "Работает и с шаблоном: он вписывается в каждую ячейку")
         T.segmented(layout, [str(v) for v in LABELS_PER_PAGE_OPTIONS],
                     variable=self.per_page_var).pack(anchor="w")
 

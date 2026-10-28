@@ -347,30 +347,24 @@ def _gen(**overrides):
 class TestTemplateSwitch:
     """«Использовать сохранённый шаблон» реально включает/выключает шаблон."""
 
-    def test_template_used_when_enabled(self, tmp_path, monkeypatch):
-        gen = _gen(label_template=TEMPLATE, barcode_use_template=True)
-        called = []
-        monkeypatch.setattr(gen, "_create_pdf_from_template", lambda *a, **k: called.append("tpl"))
-        monkeypatch.setattr(gen, "_create_pdf_default", lambda *a, **k: called.append("default"))
-        gen.create_pdf(str(tmp_path / "a.pdf"), [])
-        assert called == ["tpl"]
+    @staticmethod
+    def _kinds(gen, **kw):
+        _, _, pages = gen.layout_pages([("ABC123", "img.png")], **kw)
+        return [op[0] for op in pages[0]]
 
-    def test_template_skipped_when_disabled(self, tmp_path, monkeypatch):
+    def test_template_used_when_enabled(self):
+        gen = _gen(label_template=TEMPLATE, barcode_use_template=True)
+        assert "text" in self._kinds(gen)          # в шаблоне есть текст {code}
+
+    def test_template_skipped_when_disabled(self):
         gen = _gen(label_template=TEMPLATE, barcode_use_template=False)
-        called = []
-        monkeypatch.setattr(gen, "_create_pdf_from_template", lambda *a, **k: called.append("tpl"))
-        monkeypatch.setattr(gen, "_create_pdf_default", lambda *a, **k: called.append("default"))
-        gen.create_pdf(str(tmp_path / "a.pdf"), [])
-        assert called == ["default"]
+        assert self._kinds(gen) == ["image"]
 
-    def test_explicit_no_template_for_qr(self, tmp_path, monkeypatch):
-        """QR-паспорта передают use_template=False — шаблон штрихкодов не применяется."""
+    def test_explicit_no_template_for_qr(self):
+        """QR-паспорта передают use_template=False и keep_aspect=True."""
         gen = _gen(label_template=TEMPLATE, barcode_use_template=True)
-        called = []
-        monkeypatch.setattr(gen, "_create_pdf_from_template", lambda *a, **k: called.append("tpl"))
-        monkeypatch.setattr(gen, "_create_pdf_default", lambda *a, **k: called.append(("default", a[-1])))
-        gen.create_pdf(str(tmp_path / "a.pdf"), [], use_template=False, keep_aspect=True)
-        assert called == [("default", True)]  # без шаблона и без растягивания
+        _, _, pages = gen.layout_pages([("QR", "img.png")], use_template=False, keep_aspect=True)
+        assert [op[0] for op in pages[0]] == ["image"] and pages[0][0][-1] is True
 
     def test_template_pdf_with_metadata(self, tmp_path):
         gen = _gen(label_template=TEMPLATE, barcode_use_template=True)
@@ -378,6 +372,54 @@ class TestTemplateSwitch:
         pdf = tmp_path / "t.pdf"
         gen.create_pdf(str(pdf), [("ABC123", img)], metadata={"ABC123": {"name": "Товар"}})
         assert pdf.stat().st_size > 0
+
+    def test_metadata_substituted(self):
+        gen = _gen(label_template=TEMPLATE, barcode_use_template=True)
+        _, _, pages = gen.layout_pages([("ABC123", "img.png")], metadata={"ABC123": {"name": "Вода"}})
+        texts = [op[1] for op in pages[0] if op[0] == "text"]
+        assert texts == ["ABC123 Вода"]
+
+
+class TestTemplateGrid:
+    """Шаблон учитывает «этикеток на странице» и поля."""
+
+    def test_one_per_page_uses_template_size(self):
+        gen = _gen(label_template=TEMPLATE, barcode_use_template=True,
+                   barcode_label_width="100", barcode_label_height="70")
+        w, h, pages = gen.layout_pages([("A", "i.png"), ("B", "i.png")])
+        assert (w, h, len(pages)) == (58, 40, 2)
+
+    def test_grid_with_template(self):
+        gen = _gen(label_template=TEMPLATE, barcode_use_template=True, barcode_labels_per_page=4,
+                   barcode_label_width="120", barcode_label_height="80",
+                   barcode_margin_top="0", barcode_margin_bottom="0",
+                   barcode_margin_left="0", barcode_margin_right="0")
+        w, h, pages = gen.layout_pages([(f"C{i}", "i.png") for i in range(5)])
+        assert (w, h, len(pages)) == (120, 80, 2)
+        barcodes = [op for op in pages[0] if op[0] == "image"]
+        assert len(barcodes) == 4
+        # Ячейка 60×40, шаблон 58×40 вписан по центру; вторая ячейка правее на 60 мм
+        assert abs(barcodes[1][2] - barcodes[0][2] - 60) < 1e-6
+        assert all(op[2] + op[4] <= 120 + 1e-6 and op[3] + op[5] <= 80 + 1e-6 for op in barcodes)
+
+    def test_margins_respected_in_grid(self):
+        gen = _gen(barcode_labels_per_page=2, barcode_label_width="100", barcode_label_height="50",
+                   barcode_margin_top="5", barcode_margin_bottom="5",
+                   barcode_margin_left="10", barcode_margin_right="10")
+        _, _, pages = gen.layout_pages([("A", "i.png"), ("B", "i.png")])
+        xs = [op[2] for op in pages[0]]
+        assert xs[0] >= 10 and pages[0][1][2] + pages[0][1][4] <= 90 + 1e-6
+
+
+class TestPreviewMatchesPdf:
+    def test_render_page_image(self, tmp_path):
+        gen = _gen(label_template=TEMPLATE, barcode_use_template=True)
+        img = gen.generate_barcode_image("ABC123", str(tmp_path))
+        w, h, pages = gen.layout_pages([("ABC123", img)])
+        page = gen.render_page_image(w, h, pages[0], px_per_mm=4)
+        assert page.size == (232, 160)
+        # На странице есть тёмные пиксели (штрихкод и текст)
+        assert page.convert("L").getextrema()[0] < 50
 
 
 class TestWriterOptions:
