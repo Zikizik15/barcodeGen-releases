@@ -32,6 +32,7 @@ from barcode_generator import BarcodeGenerator
 from utils import BARCODE_TYPES, open_pdf, validate_code, read_codes_with_metadata
 
 from logger import logger
+from version import __version__, APP_NAME
 
 T.apply_theme()
 
@@ -96,7 +97,7 @@ class BarcodeApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("barcodeGen")
+        self.root.title(f"{APP_NAME} {__version__}")
         T.fit_to_screen(self.root, 1280, 820, min_width=980, min_height=620)
 
         if isinstance(self.root, ctk.CTk):
@@ -185,6 +186,7 @@ class BarcodeApp:
         self.root.bind('<Control-h>', lambda e: self.show_history_window())
         self.root.bind('<Control-p>', lambda e: self.show_preview_window())
         self.root.bind('<Control-t>', lambda e: self.show_template_dialog())
+        self.root.bind('<F1>', lambda e: self.show_about_window())
         logger.info("✅ Горячие клавиши настроены")
 
     def _bind_paste_shortcut(self, ctk_textbox):
@@ -333,8 +335,17 @@ class BarcodeApp:
         self._nav_button(sidebar, "История", self.show_history_window, "history"
                          ).pack(fill="x", padx=12, pady=2)
 
+        # Самый низ сайдбара — версия, по клику «О программе»
+        about = ctk.CTkButton(
+            sidebar, text=f"О программе  ·  v{__version__}", anchor="w",
+            command=self.show_about_window, fg_color="transparent",
+            hover_color=T.SIDEBAR_HOVER, text_color=T.SIDEBAR_TEXT_2,
+            font=T.font(11, "semibold"), corner_radius=10, height=30,
+        )
+        about.pack(side="bottom", fill="x", padx=14, pady=(0, 14))
+
         hints = ctk.CTkFrame(sidebar, fg_color="transparent")
-        hints.pack(side="bottom", anchor="w", padx=26, pady=(0, 22))
+        hints.pack(side="bottom", anchor="w", padx=26, pady=(0, 14))
         for row, (keys, action) in enumerate([("Ctrl+G", "создать PDF"),
                                               ("Ctrl+P", "предпросмотр"),
                                               ("Ctrl+O", "открыть файл"),
@@ -889,6 +900,56 @@ class BarcodeApp:
         T.button(window, "Закрыть", window.destroy, width=130
                  ).grid(row=2, column=0, sticky="e", padx=28, pady=(4, 20))
         logger.info("Открыто окно истории")
+
+    @staticmethod
+    def system_info():
+        """Сведения для поддержки: версия программы, системы и данных."""
+        import platform
+        from settings import APP_DATA_PATH
+        return (f"{APP_NAME} {__version__}\n"
+                f"{platform.system()} {platform.release()} ({platform.version()})\n"
+                f"Python {platform.python_version()}\n"
+                f"Данные: {APP_DATA_PATH}")
+
+    @error_handler
+    def show_about_window(self):
+        from settings import APP_DATA_PATH
+        window = self._dialog("О программе", 660, 420)
+        window.resizable(False, False)
+        window.bind("<Escape>", lambda e: window.destroy())
+
+        top = ctk.CTkFrame(window, fg_color="transparent")
+        top.pack(fill="x", padx=30, pady=(28, 0))
+        ctk.CTkLabel(top, image=T.eco_illustration(96), text="").pack(side="left", padx=(0, 24))
+
+        info = ctk.CTkFrame(top, fg_color="transparent")
+        info.pack(side="left", fill="x", expand=True)
+        T.title(info, APP_NAME, size=26).pack(anchor="w")
+        T.chip(info, f"ВЕРСИЯ {__version__}", strong=True).pack(anchor="w", pady=(6, 10))
+        T.label(info, "Этикетки со штрихкодами и QR-паспорта:\nPDF, ZIP и печать на принтер",
+                size=13, color=T.TEXT_2, justify="left").pack(anchor="w")
+
+        box = T.card(window, fg_color=T.SURFACE_2, border_width=0)
+        box.pack(fill="x", padx=30, pady=(22, 0))
+        details = self.system_info().split("\n", 1)[1]
+        T.label(box, details, size=12, color=T.TEXT_2, justify="left", wraplength=540
+                ).pack(anchor="w", padx=16, pady=12)
+
+        def copy_info():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.system_info())
+            copy_btn.configure(text="СКОПИРОВАНО ✓")
+            window.after(1500, lambda: copy_btn.winfo_exists() and copy_btn.configure(text="Скопировать сведения"))
+
+        buttons = ctk.CTkFrame(window, fg_color="transparent")
+        buttons.pack(fill="x", padx=30, pady=(18, 24))
+        T.button(buttons, "Папка с данными и логами", lambda: open_pdf(APP_DATA_PATH),
+                 height=38).pack(side="left")
+        copy_btn = T.button(buttons, "Скопировать сведения", copy_info, height=38)
+        copy_btn.pack(side="left", padx=(8, 0))
+        T.Tooltip(copy_btn, "Пригодится, если нужно сообщить о проблеме")
+        T.button(buttons, "Закрыть", window.destroy, variant="ghost", height=38
+                 ).pack(side="right")
 
     @error_handler
     def show_preview_window(self):

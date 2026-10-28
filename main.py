@@ -56,6 +56,8 @@ except Exception:
 # ========== ИМПОРТ ЛОГГЕРА ==========
 from logger import logger
 
+from version import __version__, APP_NAME
+
 # ========== ПУТЬ К ДАННЫМ (для логов и сообщений об ошибках) ==========
 from settings import APP_DATA_PATH
 
@@ -91,7 +93,7 @@ sys.excepthook = exception_handler
 # ========== ОСНОВНАЯ ФУНКЦИЯ ==========
 def main():
     logger.info("=" * 60)
-    logger.info("🚀 ЗАПУСК ПРИЛОЖЕНИЯ")
+    logger.info(f"🚀 ЗАПУСК ПРИЛОЖЕНИЯ {APP_NAME} {__version__}")
     logger.info(f"Платформа: {sys.platform}")
     logger.info(f"Путь: {application_path}")
     logger.info(f"Данные: {APP_DATA_PATH}")
