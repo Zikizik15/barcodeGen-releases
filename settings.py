@@ -189,6 +189,7 @@ class SettingsManager:
             "qr_show_border": False,
             "qr_box_size": "8",
             "qr_format": "text",
+            "qr_logo": "none",          # none | drop | путь к своей картинке
             "qr_records": [],
 
             # ===== Совместимость (устаревшие ключи) =====

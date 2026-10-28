@@ -29,7 +29,8 @@ from .gui_qr_tab import QRPassportTab
 
 from settings import SettingsManager
 from barcode_generator import BarcodeGenerator
-from utils import BARCODE_TYPES, open_pdf, validate_code, read_codes_with_metadata
+from utils import (BARCODE_TYPES, open_pdf, validate_code, read_codes_with_metadata,
+                   make_series)
 
 from logger import logger
 from version import __version__, APP_NAME
@@ -429,6 +430,7 @@ class BarcodeApp:
 
         for text, cmd in [("Загрузить", self.load_from_file),
                           ("Сохранить", self.save_to_file),
+                          ("Серия", self.show_series_dialog),
                           ("Случайный код", self.show_random_dialog),
                           ("Excel", self.export_to_excel)]:
             T.button(toolbar, text, cmd, height=36).pack(side="left", padx=(0, 8))
@@ -793,6 +795,107 @@ class BarcodeApp:
 
         T.button(dialog, "Отмена", dialog.destroy, variant="ghost", width=120
                  ).pack(pady=(14, 20))
+
+    @error_handler
+    def show_series_dialog(self):
+        """Последовательные номера: SN-0001 … SN-0100."""
+        btype = self.barcode_type.get()
+        gtin_len = {"ean13": 12, "ean8": 7, "upca": 11}.get(btype)
+        last = self.settings.get("series_last") or {}
+        if gtin_len:
+            defaults = {"prefix": "", "suffix": "", "start": "1", "count": "100",
+                        "step": "1", "width": str(gtin_len)}
+        else:
+            defaults = {"prefix": "SN-", "suffix": "", "start": "1", "count": "100",
+                        "step": "1", "width": "4"}
+        if last.get("type_group") == bool(gtin_len):
+            defaults.update({k: str(v) for k, v in last.items() if k in defaults})
+        vars_ = {k: StringVar(value=v) for k, v in defaults.items()}
+        check_var = BooleanVar(value=bool(gtin_len))
+
+        dialog = self._dialog("Серия номеров", 560, 590 if gtin_len else 540)
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
+        T.title(dialog, "Серия номеров", size=22).pack(anchor="w", padx=28, pady=(26, 2))
+        T.label(dialog, "Коды добавятся в конец списка", size=13, color=T.TEXT_2
+                ).pack(anchor="w", padx=28, pady=(0, 14))
+
+        form = T.card(dialog)
+        form.pack(fill="x", padx=24)
+        fields = [("Префикс", "prefix", 0, 0), ("Суффикс", "suffix", 0, 1),
+                  ("Начать с", "start", 1, 0), ("Количество", "count", 1, 1),
+                  ("Шаг", "step", 2, 0), ("Цифр в номере", "width", 2, 1)]
+        for label_text, key, row, col in fields:
+            box = ctk.CTkFrame(form, fg_color="transparent")
+            bottom = 18 if (row == 2 and not gtin_len) else 0
+            box.grid(row=row, column=col, sticky="w", padx=(20 if col == 0 else 12, 20),
+                     pady=(14 if row == 0 else 6, bottom))
+            T.field_label(box, label_text).pack(anchor="w")
+            T.entry(box, vars_[key], width=220).pack(anchor="w", pady=(4, 0))
+        if gtin_len:
+            T.switch(form, f"Дописать контрольную цифру {BARCODE_TYPE_SHORT[btype]}", check_var
+                     ).grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=(14, 18))
+
+        T.field_label(dialog, "Получится").pack(anchor="w", padx=28, pady=(16, 4))
+        preview = T.label(dialog, "", size=14, weight="semibold", justify="left", anchor="w")
+        preview.pack(anchor="w", padx=28)
+        problem = T.label(dialog, "", size=12, color=T.ERROR, justify="left", wraplength=500)
+        problem.pack(anchor="w", padx=28, pady=(4, 0))
+
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(side="bottom", fill="x", padx=24, pady=(0, 22))
+        add_btn = T.button(buttons, "Добавить", None, variant="primary", height=46, width=260)
+        add_btn.pack(side="right")
+        T.button(buttons, "Отмена", dialog.destroy, variant="ghost", height=46).pack(side="right", padx=(0, 8))
+
+        def build():
+            """Список кодов по полям формы или текст ошибки."""
+            try:
+                nums = {k: int(vars_[k].get() or 0) for k in ("start", "count", "step", "width")}
+            except ValueError:
+                return None, "Начало, количество, шаг и число цифр — целые числа"
+            try:
+                codes = make_series(vars_["prefix"].get(), nums["start"], nums["count"], nums["step"],
+                                    nums["width"], vars_["suffix"].get(),
+                                    check_digit=bool(gtin_len) and check_var.get())
+            except ValueError as e:
+                return None, str(e)
+            bad = [c for c in codes if not validate_code(c, btype)[0]]
+            if bad:
+                reason = validate_code(bad[0], btype)[1]
+                return codes, f"{len(bad)} из {len(codes)} не подходят для {BARCODE_TYPE_SHORT[btype]}: {reason}"
+            return codes, ""
+
+        def refresh(*_):
+            codes, error = build()
+            if not codes:
+                preview.configure(text="—")
+            elif len(codes) <= 3:
+                preview.configure(text="   ".join(codes))
+            else:
+                preview.configure(text=f"{codes[0]}   {codes[1]}   …   {codes[-1]}")
+            problem.configure(text=error)
+            ok = bool(codes) and not error
+            n = len(codes) if codes else 0
+            add_btn.configure(state="normal" if ok else "disabled",
+                              text=f"ДОБАВИТЬ {n} {plural(n, 'КОД', 'КОДА', 'КОДОВ')}" if ok else "ДОБАВИТЬ")
+
+        def add():
+            codes, error = build()
+            if not codes or error:
+                return
+            self.settings.set("series_last", {**{k: v.get() for k, v in vars_.items()},
+                                              "type_group": bool(gtin_len)})
+            self.show_page("input")
+            self._append_codes("\n".join(codes))
+            self.update_all()
+            self.set_status(f"Добавлена серия: {codes[0]} … {codes[-1]} ({len(codes)} шт.)", 'success')
+            logger.info(f"Добавлена серия {codes[0]}…{codes[-1]} ({len(codes)})")
+            dialog.destroy()
+
+        add_btn.configure(command=add)
+        for v in list(vars_.values()) + [check_var]:
+            v.trace_add("write", refresh)
+        refresh()
 
     @error_handler
     def _add_code(self, code):

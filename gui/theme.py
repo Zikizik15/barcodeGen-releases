@@ -510,6 +510,12 @@ def logo_image(size=40):
     return _art_cache[key]
 
 
+def drop_logo_pil(size=256):
+    """Капля-мозаика картинкой PIL — для центра QR-кода."""
+    return _cached_art(f"qrlogo_{size}",
+                       lambda: _mosaic(size, seed=3, density=6, attempts=5000))
+
+
 def eco_illustration(width=150):
     """Знак переработки над каплей из мусора — для пустых состояний."""
     key = ("eco", width)

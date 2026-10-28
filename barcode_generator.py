@@ -15,6 +15,7 @@ from utils import (
     validate_code,
     get_barcode_params,
     find_font_path,
+    make_qr_image,
     GRID_MAP,
     DEFAULT_QR_BOX_SIZE,
 )
@@ -56,6 +57,7 @@ class BarcodeGenerator:
         self.qr_box_size = DEFAULT_QR_BOX_SIZE
         self.status_callback = None
         self.progress_callback = None
+        self.qr_logo = None  # PIL-картинка логотипа для центра QR (задаёт вкладка QR)
         self.load_settings()
 
     def load_settings(self):
@@ -138,10 +140,7 @@ class BarcodeGenerator:
 
             if use_qr and QRCODE_AVAILABLE:
                 bs = int(self.qr_box_size)
-                qr = qrcode.QRCode(version=None, box_size=bs, border=2)
-                qr.add_data(code_str)
-                qr.make(fit=True)
-                img = qr.make_image(fill_color="black", back_color="white")
+                img = make_qr_image(code_str, bs, logo=self.qr_logo)
 
                 if as_bytes:
                     buffer = io.BytesIO()

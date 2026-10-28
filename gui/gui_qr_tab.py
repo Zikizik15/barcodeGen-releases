@@ -18,7 +18,7 @@ from PIL import Image
 
 from . import theme as T
 from logger import logger
-from utils import open_pdf, DEFAULT_QR_BOX_SIZE
+from utils import open_pdf, make_qr_image, DEFAULT_QR_BOX_SIZE
 
 PREVIEW_SIZE = 210
 FORMAT_LABELS = {"text": "Текст", "json": "JSON"}
@@ -247,18 +247,27 @@ class QRPassportTab:
             return
 
         try:
-            import qrcode
             bs = int(self.app.settings.get("qr_box_size", DEFAULT_QR_BOX_SIZE))
-            qr = qrcode.QRCode(version=None, box_size=bs, border=1)
-            qr.add_data(payload)
-            qr.make(fit=True)
-            img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+            img = make_qr_image(payload, bs, logo=self.logo_image(), border=1)
             self._preview_image = ctk.CTkImage(light_image=img, dark_image=img,
                                                size=(PREVIEW_SIZE, PREVIEW_SIZE))
             self.preview_label.configure(image=self._preview_image, text="")
         except Exception as e:
             logger.warning(f"QR preview error: {e}")
             self.preview_label.configure(image=None, text="Ошибка QR")
+
+    def logo_image(self):
+        """Логотип для центра QR по настройке: нет, капля или свой файл."""
+        choice = self.app.settings.get("qr_logo", "none") or "none"
+        if choice == "none":
+            return None
+        if choice == "drop":
+            return T.drop_logo_pil()
+        try:
+            return Image.open(choice).convert("RGBA")
+        except Exception as e:
+            logger.warning(f"Логотип QR не загружен ({choice}): {e}")
+            return None
 
     def show_qr_settings(self):
         """Открывает окно настроек модуля «QR-паспорта»."""
@@ -416,6 +425,7 @@ class QRPassportTab:
             "labels_per_page": gen.labels_per_page,
             "qr_box_size": gen.qr_box_size,
             "barcode_dpi": gen.barcode_dpi,
+            "qr_logo": gen.qr_logo,
         }
 
         gen.label_width = qr_w
@@ -424,6 +434,7 @@ class QRPassportTab:
         gen.show_border = qr_show_border
         gen.labels_per_page = 1
         gen.qr_box_size = qr_box_size
+        gen.qr_logo = self.logo_image()
 
         try:
             with tempfile.TemporaryDirectory() as tmp:
@@ -474,5 +485,6 @@ class QRPassportTab:
                 gen.labels_per_page = prev_state["labels_per_page"]
                 gen.qr_box_size = prev_state["qr_box_size"]
                 gen.barcode_dpi = prev_state["barcode_dpi"]
+                gen.qr_logo = prev_state["qr_logo"]
             except Exception:
                 pass

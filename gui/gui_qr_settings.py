@@ -1,6 +1,10 @@
 # gui/gui_qr_settings.py - Окно настроек модуля «QR-паспорта»
 
+import os
+import shutil
+import uuid
 import tkinter as tk
+from tkinter import filedialog
 
 from . import theme as T
 from .gui_widgets import SettingsWindow
@@ -8,6 +12,7 @@ from utils import QR_BOX_SIZE_PRESETS, DEFAULT_QR_BOX_SIZE
 from logger import logger
 
 FORMATS = {"text": "Текст", "json": "JSON"}
+LOGO_MODES = {"none": "Нет", "drop": "Капля", "file": "Свой файл"}
 
 
 def _box_hint(value):
@@ -33,9 +38,12 @@ class QRSettingsWindow(SettingsWindow):
         self.qr_box_size = tk.StringVar(value=str(s.get("qr_box_size", DEFAULT_QR_BOX_SIZE)))
         self.qr_format = tk.StringVar(value=FORMATS.get(qr_tab.qr_format.get(), "Текст"))
         self.qr_show_border = tk.BooleanVar(value=s.get("qr_show_border", False))
+        logo = s.get("qr_logo", "none") or "none"
+        self.logo_path = logo if logo not in ("none", "drop") else ""
+        self.logo_mode = tk.StringVar(value=LOGO_MODES["file" if self.logo_path else logo])
 
         super().__init__(master, "Настройки QR-паспортов",
-                         "Не зависят от настроек штрихкодов", width=600, height=680)
+                         "Не зависят от настроек штрихкодов", width=600, height=720)
 
     def build(self):
         size = self.section("Размер этикетки")
@@ -56,8 +64,39 @@ class QRSettingsWindow(SettingsWindow):
                            "Текст удобно читать телефоном, JSON — обрабатывать программой")
         T.segmented(fmt, list(FORMATS.values()), variable=self.qr_format).pack(anchor="w")
 
+        logo = self.section("Логотип в центре QR",
+                            "Код остаётся читаемым: включается максимальная коррекция ошибок")
+        T.segmented(logo, list(LOGO_MODES.values()), variable=self.logo_mode,
+                    command=self._on_logo_mode).pack(anchor="w")
+        self.logo_label = T.label(logo, self._logo_caption(), size=12, color=T.TEXT_2)
+        self.logo_label.pack(anchor="w", pady=(8, 0))
+
         extra = self.section("Дополнительно")
         T.switch(extra, "Рисовать рамку вокруг этикетки", self.qr_show_border).pack(anchor="w")
+
+    def _logo_caption(self):
+        if self.logo_mode.get() == LOGO_MODES["file"] and self.logo_path:
+            return f"Файл: {os.path.basename(self.logo_path)}"
+        if self.logo_mode.get() == LOGO_MODES["drop"]:
+            return "Фирменная капля из бутылок"
+        return "QR без логотипа"
+
+    def _on_logo_mode(self, value):
+        if value == LOGO_MODES["file"]:
+            path = filedialog.askopenfilename(
+                parent=self, title="Логотип для QR",
+                filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.gif"), ("Все файлы", "*.*")])
+            if path:
+                # Копия в папку данных: исходный файл могут переместить или удалить
+                from settings import APP_DATA_PATH
+                assets = os.path.join(APP_DATA_PATH, "assets")
+                os.makedirs(assets, exist_ok=True)
+                dst = os.path.join(assets, f"qrlogo_{uuid.uuid4().hex[:8]}_{os.path.basename(path)}")
+                shutil.copy(path, dst)
+                self.logo_path = dst
+            elif not self.logo_path:
+                self.logo_mode.set(LOGO_MODES["none"])
+        self.logo_label.configure(text=self._logo_caption())
 
     def apply(self):
         for var in (self.qr_w, self.qr_h):
@@ -78,6 +117,8 @@ class QRSettingsWindow(SettingsWindow):
             "qr_box_size": self.qr_box_size.get(),
             "qr_format": fmt,
             "qr_show_border": self.qr_show_border.get(),
+            "qr_logo": {LOGO_MODES["none"]: "none", LOGO_MODES["drop"]: "drop"}.get(
+                self.logo_mode.get(), self.logo_path or "none"),
         })
 
         self.qr_tab.qr_format.set(fmt)

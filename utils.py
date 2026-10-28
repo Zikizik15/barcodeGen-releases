@@ -437,3 +437,60 @@ def suggest_barcode_type(code):
             return "itf"
         return "code39"
     return "code128"
+
+# ========== СЕРИЯ НОМЕРОВ ==========
+MAX_SERIES = 10000
+
+
+def make_series(prefix="", start=1, count=10, step=1, width=4, suffix="", check_digit=False):
+    """Последовательные коды: make_series("SN-", 1, 3) → SN-0001, SN-0002, SN-0003.
+    width — минимальное число цифр (дополняется нулями слева).
+    check_digit — дописать контрольную цифру EAN/UPC (номер должен быть из цифр)."""
+    if count < 1 or count > MAX_SERIES:
+        raise ValueError(f"Количество — от 1 до {MAX_SERIES}")
+    if step == 0:
+        raise ValueError("Шаг не может быть нулевым")
+    codes = []
+    for i in range(count):
+        n = start + i * step
+        if n < 0:
+            raise ValueError("Номер получился отрицательным — уменьшите шаг или количество")
+        code = f"{prefix}{n:0{max(1, width)}d}{suffix}"
+        if check_digit:
+            if not code.isdigit():
+                raise ValueError("Для контрольной цифры код должен состоять только из цифр")
+            code += str(gtin_check_digit(code))
+        codes.append(code)
+    return codes
+
+
+# ========== QR-КОД ==========
+def make_qr_image(data, box_size=8, logo=None, border=2):
+    """QR-код как картинка PIL. С логотипом включается коррекция ошибок H
+    (до 30% кода можно закрыть), логотип ставится в центр на белую подложку."""
+    import qrcode
+    from PIL import ImageDraw
+
+    qr = qrcode.QRCode(
+        version=None, box_size=int(box_size), border=border,
+        error_correction=qrcode.constants.ERROR_CORRECT_H if logo is not None
+        else qrcode.constants.ERROR_CORRECT_M,
+    )
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    if logo is None:
+        return img
+
+    # Подложка ~24% ширины: это заметно меньше допустимых 30% потерь
+    side = int(img.width * 0.24)
+    pad = max(2, side // 10)
+    badge = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    ImageDraw.Draw(badge).rounded_rectangle([0, 0, side - 1, side - 1],
+                                            radius=side // 5, fill="white")
+    mark = logo.convert("RGBA")
+    k = min((side - 2 * pad) / mark.width, (side - 2 * pad) / mark.height)
+    mark = mark.resize((max(1, int(mark.width * k)), max(1, int(mark.height * k))), Image.LANCZOS)
+    badge.alpha_composite(mark, ((side - mark.width) // 2, (side - mark.height) // 2))
+    img.paste(badge, ((img.width - side) // 2, (img.height - side) // 2), badge)
+    return img

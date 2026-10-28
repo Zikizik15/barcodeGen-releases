@@ -405,3 +405,60 @@ class TestCheckDigit:
         for data, btype in [("590123412345", "ean13"), ("9638507", "ean8"), ("03600029145", "upca")]:
             full = barcode.get_barcode_class(btype)(data).get_fullcode()
             assert full[-1] == str(gtin_check_digit(data))
+
+
+# ========== Серия номеров ==========
+
+from utils import make_series, make_qr_image
+
+
+class TestMakeSeries:
+    def test_basic(self):
+        assert make_series("SN-", 1, 3) == ["SN-0001", "SN-0002", "SN-0003"]
+
+    def test_step_width_suffix(self):
+        assert make_series("A", 10, 3, step=5, width=3, suffix="-X") == ["A010-X", "A015-X", "A020-X"]
+
+    def test_number_longer_than_width(self):
+        assert make_series("", 99, 2, width=2) == ["99", "100"]
+
+    def test_ean_check_digit(self):
+        codes = make_series("", 400638133393, 1, width=12, check_digit=True)
+        assert codes == ["4006381333931"]
+        assert validate_code(codes[0], "ean13")[0]
+
+    def test_check_digit_needs_digits(self):
+        with pytest.raises(ValueError):
+            make_series("SN-", 1, 2, check_digit=True)
+
+    @pytest.mark.parametrize("kwargs", [{"count": 0}, {"count": 10001}, {"step": 0},
+                                        {"start": 1, "count": 3, "step": -1}])
+    def test_invalid_params(self, kwargs):
+        with pytest.raises(ValueError):
+            make_series("SN-", **{"start": 1, "count": 5, **kwargs})
+
+
+# ========== QR с логотипом ==========
+
+class TestQrImage:
+    PAYLOAD = "ФИО: Иванов Иван Иванович\nКуртка, Ботинки, Перчатки\nДата: 28-10-2026"
+
+    def test_without_logo(self):
+        img = make_qr_image("SN-0001", 4)
+        assert img.mode == "RGB" and img.width == img.height
+
+    def test_logo_in_center(self):
+        from PIL import Image
+        logo = Image.new("RGBA", (50, 50), (255, 0, 0, 255))
+        img = make_qr_image(self.PAYLOAD, 8, logo=logo)
+        r, g, b = img.getpixel((img.width // 2, img.height // 2))
+        assert r > 200 and g < 50          # в центре — красный логотип
+
+    @pytest.mark.parametrize("box", [4, 8])
+    def test_logo_qr_still_readable(self, box):
+        pyzbar = pytest.importorskip("pyzbar.pyzbar")
+        from PIL import Image, ImageOps
+        logo = Image.new("RGBA", (50, 50), (30, 120, 220, 255))
+        img = make_qr_image(self.PAYLOAD, box, logo=logo)
+        found = pyzbar.decode(ImageOps.expand(img, 10, "white"))
+        assert found and found[0].data.decode("utf-8") == self.PAYLOAD
