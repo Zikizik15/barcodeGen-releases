@@ -23,7 +23,7 @@ from utils import (
 from logger import logger
 
 try:
-    import qrcode
+    import qrcode  # noqa: F401 — только проверка, что библиотека установлена
     QRCODE_AVAILABLE = True
 except ImportError:
     QRCODE_AVAILABLE = False
@@ -347,7 +347,6 @@ class BarcodeGenerator:
         return page
 
     def generate_zip_archive(self, codes, filename):
-        import zipfile
         self.update_status("⏳ Генерация изображений...", 'warning')
         with tempfile.TemporaryDirectory() as temp_dir:
             image_files = []

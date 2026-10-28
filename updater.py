@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 
 # Публичный репозиторий только с установщиками (исходный код — в приватном)
@@ -34,6 +35,21 @@ CHUNK = 64 * 1024
 
 class UpdateError(Exception):
     """Понятная пользователю ошибка обновления."""
+
+
+class NoReleases(UpdateError):
+    """Ни одного обновления ещё не опубликовано — это не ошибка."""
+
+
+def _human_error(e):
+    """Сетевые ошибки — понятным языком."""
+    if isinstance(e, urllib.error.HTTPError):
+        return f"сервер ответил ошибкой {e.code}"
+    if isinstance(e, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        return "нет связи с сервером обновлений — проверьте интернет"
+    if isinstance(e, FileNotFoundError):
+        return "файл не найден"
+    return str(e)
 
 
 def manifest_url():
@@ -66,10 +82,15 @@ def fetch_manifest(source=None):
     try:
         with _open(source) as f:
             data = json.loads(f.read().decode("utf-8-sig"))
-    except UpdateError:
-        raise
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # В репозитории ещё нет ни одного релиза с latest.json
+            raise NoReleases("Обновлений пока не публиковали")
+        raise UpdateError(f"Не удалось проверить обновления: {_human_error(e)}")
+    except ValueError:
+        raise UpdateError("Описание обновления повреждено (latest.json)")
     except Exception as e:
-        raise UpdateError(f"Не удалось получить сведения об обновлении: {e}")
+        raise UpdateError(f"Не удалось проверить обновления: {_human_error(e)}")
     for key in ("version", "url", "sha256"):
         if not data.get(key):
             raise UpdateError(f"В описании обновления нет поля «{key}»")
@@ -80,7 +101,10 @@ def fetch_manifest(source=None):
 
 def check_for_update(current_version, source=None):
     """Манифест, если есть версия новее текущей, иначе None."""
-    manifest = fetch_manifest(source)
+    try:
+        manifest = fetch_manifest(source)
+    except NoReleases:
+        return None
     return manifest if is_newer(manifest["version"], current_version) else None
 
 
@@ -122,7 +146,7 @@ def download(manifest, progress=None, cancel=None, dest_dir=None):
         raise
     except Exception as e:
         _remove(path)
-        raise UpdateError(f"Не удалось скачать обновление: {e}")
+        raise UpdateError(f"Не удалось скачать обновление: {_human_error(e)}")
 
     if sha256_file(path).lower() != manifest["sha256"].strip().lower():
         _remove(path)

@@ -4,7 +4,6 @@
 # Тип кода выбирается прямо на главном экране, поэтому здесь его нет.
 
 import tkinter as tk
-import customtkinter as ctk
 
 from . import theme as T
 from .gui_widgets import SettingsWindow

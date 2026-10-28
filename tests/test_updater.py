@@ -93,3 +93,36 @@ def test_install_command_relaunches():
 
 def test_source_run_cannot_self_update():
     assert updater.can_self_update() is False   # запуск из исходников — не установленная программа
+
+
+class TestFriendlyErrors:
+    """Ошибки сети — понятным языком; «нет релизов» — не ошибка."""
+
+    @staticmethod
+    def _fail_with(monkeypatch, exc):
+        def fake_open(source):
+            raise exc
+        monkeypatch.setattr(updater, "_open", fake_open)
+
+    def test_no_releases_means_no_update(self, monkeypatch):
+        import urllib.error
+        self._fail_with(monkeypatch, urllib.error.HTTPError("u", 404, "Not Found", {}, None))
+        assert updater.check_for_update("8.12.0") is None
+
+    def test_offline_message(self, monkeypatch):
+        import urllib.error
+        self._fail_with(monkeypatch, urllib.error.URLError("getaddrinfo failed"))
+        with pytest.raises(UpdateError, match="нет связи"):
+            updater.check_for_update("8.12.0")
+
+    def test_server_error_message(self, monkeypatch):
+        import urllib.error
+        self._fail_with(monkeypatch, urllib.error.HTTPError("u", 500, "Server Error", {}, None))
+        with pytest.raises(UpdateError, match="ошибкой 500"):
+            updater.check_for_update("8.12.0")
+
+    def test_broken_json(self, tmp_path):
+        p = tmp_path / "latest.json"
+        p.write_text("{ не json", encoding="utf-8")
+        with pytest.raises(UpdateError, match="повреждено"):
+            updater.fetch_manifest(str(p))

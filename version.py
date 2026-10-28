@@ -4,5 +4,5 @@
 # pyproject.toml (тест tests/test_version.py проверяет, что они совпадают).
 # Отсюда номер берут заголовок окна, «О программе», лог и установщик.
 
-__version__ = "6.4.0"
+__version__ = "8.13.0"
 APP_NAME = "barcodeGen"

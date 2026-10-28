@@ -139,7 +139,7 @@ def main():
             logger.warning(f"⚠️ Не удалось установить иконку окна: {e}")
 
         # ========== Запуск GUI ==========
-        app = BarcodeApp(root)
+        app = BarcodeApp(root)  # noqa: F841 — держим ссылку на главное окно
         logger.info("✅ Приложение успешно создано")
 
         root.mainloop()

@@ -8,7 +8,6 @@
 import os
 import sys
 import logging
-from datetime import datetime
 
 
 def _get_log_dir():

@@ -6,11 +6,9 @@
 #   - Нижняя панель: статус и счётчики
 # Все цвета, шрифты и виджеты — из gui/theme.py.
 
-import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import StringVar, BooleanVar, IntVar
 import customtkinter as ctk
-import sys
 import os
 import re
 import random
@@ -1191,7 +1189,7 @@ class BarcodeApp:
             box = queue.Queue()
 
             def on_progress(done, total):
-                box.put(("progress", done / total if total else 0))
+                box.put(("progress", (done, total)))
 
             def work():
                 try:
@@ -1206,8 +1204,18 @@ class BarcodeApp:
                     while True:
                         kind, data = box.get_nowait()
                         if kind == "progress":
-                            progress.set(data)
-                            status.configure(text=f"Скачано {int(data * 100)}%")
+                            done, total = data
+                            mb = done / 1024 / 1024
+                            if total:
+                                progress.set(done / total)
+                                status.configure(text=f"Скачано {int(done * 100 / total)}%  ·  {mb:.1f} МБ")
+                            else:
+                                # Сервер не сообщил размер — бегущая полоса и мегабайты
+                                if not state.get("indeterminate"):
+                                    state["indeterminate"] = True
+                                    progress.configure(mode="indeterminate")
+                                    progress.start()
+                                status.configure(text=f"Скачано {mb:.1f} МБ")
                         elif kind == "error":
                             state["busy"] = False
                             update_btn.configure(state="normal", text="ПОВТОРИТЬ")

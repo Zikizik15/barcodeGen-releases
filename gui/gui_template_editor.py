@@ -363,7 +363,6 @@ class TemplateEditor(ctk.CTkToplevel):
 
     # ========== ПАНЕЛЬ СВОЙСТВ ==========
     def update_props_panel(self):
-        c = COLORS
         for widget in self.props_frame.winfo_children():
             widget.destroy()
 
@@ -698,12 +697,20 @@ class TemplateEditor(ctk.CTkToplevel):
     def save_template(self):
         """Сохраняет текущий шаблон и делает его активным."""
         self.templates[self.current_name] = copy.deepcopy(self.template)
-        self.app.settings.set("label_templates", self.templates)
-        self.app.settings.set("current_template", self.current_name)
-        self.app.settings.set("label_template", self.template)  # активный для PDF
+        self.app.settings.update({
+            "label_templates": self.templates,
+            "current_template": self.current_name,
+            "label_template": self.template,  # активный для PDF
+        })
 
-        self.app.label_width.set(str(self.template["label_width"]))
-        self.app.label_height.set(str(self.template["label_height"]))
+        # Размер страницы = размер шаблона только при одной этикетке на странице.
+        # При раскладке сеткой страница — это лист, на который шаблон вписывается,
+        # и её размер трогать нельзя.
+        if int(self.app.labels_per_page.get()) == 1:
+            self.app.label_width.set(str(self.template["label_width"]))
+            self.app.label_height.set(str(self.template["label_height"]))
+        self.app.save_current_settings()
+        self.app.generator.load_settings()
         self.app.update_all()
 
         messagebox.showinfo("Сохранено",

@@ -50,9 +50,10 @@ Name: "{group}\Удалить {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExe}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExe}"; Description: "Запустить {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExe}"; Description: "Запустить {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 ; При обновлении из программы (тихая установка с /UPDATE=1) — запустить её снова
-Filename: "{app}\{#MyAppExe}"; Flags: nowait; Check: IsUpdate
+; runasoriginaluser — без прав администратора, даже если установщик их получил
+Filename: "{app}\{#MyAppExe}"; Flags: nowait runasoriginaluser; Check: IsUpdate
 
 [Code]
 function IsUpdate: Boolean;
