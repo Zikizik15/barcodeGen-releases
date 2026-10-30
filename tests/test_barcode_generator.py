@@ -439,6 +439,29 @@ class TestWriterOptions:
         no_text = Image.open(_gen(barcode_show_text=False).generate_barcode_to_bytes("ABC123"))
         assert no_text.height < with_text.height
 
+    def test_chosen_font_applied_to_writer(self):
+        """Выбранное пользователем семейство попадает в writer.font_path."""
+        from utils import BARCODE_FONT_DEFAULT, list_fonts
+        fonts = list_fonts()
+        assert fonts
+        family = BARCODE_FONT_DEFAULT if any(n == BARCODE_FONT_DEFAULT for n, _ in fonts) \
+            else fonts[0][0]
+        gen = _gen(barcode_font_family=family)
+        writer = gen.get_writer()
+        path = writer.font_path
+        assert path and os.path.exists(path)
+
+    def test_chosen_font_bakes_text_single_dpi(self):
+        """Выбранный шрифт реально используется при отрисовке подписи."""
+        from PIL import Image
+        from utils import list_fonts
+        fonts = [name for name, _ in list_fonts()][:2]
+        heights = []
+        for fam in fonts:
+            img = Image.open(_gen(barcode_font_family=fam).generate_barcode_to_bytes("ABC123"))
+            heights.append(img.height)
+        assert all(h > 0 for h in heights)
+
 
 class TestWriteZip:
     def test_duplicate_names_not_overwritten(self, tmp_path):

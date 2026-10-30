@@ -126,6 +126,7 @@ class BarcodeApp:
         self.batch_mode = BooleanVar(value=self.settings.get("barcode_batch_mode", False))
         self.use_template = BooleanVar(value=self.settings.get("barcode_use_template", True))
         self.show_text = BooleanVar(value=self.settings.get("barcode_show_text", True))
+        self.barcode_font_family = StringVar(value=self.settings.get("barcode_font_family", "Montserrat"))
         self.barcode_dpi = StringVar(value=self.settings.get("barcode_dpi", "600"))
         self.search_var = StringVar(value="")
 
@@ -1439,6 +1440,7 @@ class BarcodeApp:
             "barcode_batch_mode": self.batch_mode.get(),
             "barcode_use_template": self.use_template.get(),
             "barcode_show_text": self.show_text.get(),
+            "barcode_font_family": self.barcode_font_family.get(),
             "barcode_dpi": self.barcode_dpi.get(),
         })
 

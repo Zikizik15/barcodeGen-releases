@@ -462,3 +462,45 @@ class TestQrImage:
         img = make_qr_image(self.PAYLOAD, box, logo=logo)
         found = pyzbar.decode(ImageOps.expand(img, 10, "white"))
         assert found and found[0].data.decode("utf-8") == self.PAYLOAD
+
+
+# ========== Шрифт подписи под штрихкодом ==========
+
+from utils import list_fonts, find_font_path_by_family, find_font_path, BARCODE_FONT_DEFAULT
+
+
+class TestFonts:
+    def test_list_fonts_not_empty(self):
+        """В списке есть хотя бы встроенный Montserrat, пути существуют."""
+        fonts = list_fonts()
+        assert fonts
+        for name, path in fonts:
+            assert isinstance(name, str) and name
+            assert os.path.exists(path)
+
+    def test_default_font_present(self):
+        """Встроенный Montserrat — в списке и идёт первым."""
+        fonts = list_fonts(force=True)  # force: пересканировать с нуля
+        names = [name for name, _ in fonts]
+        assert BARCODE_FONT_DEFAULT in names
+        assert fonts[0][0] == BARCODE_FONT_DEFAULT
+
+    def test_find_by_family_returns_existing_file(self):
+        path = find_font_path_by_family(BARCODE_FONT_DEFAULT)
+        assert path and os.path.exists(path)
+
+    def test_find_unknown_family_returns_none(self):
+        assert find_font_path_by_family("Нет такого шрифта 987654") is None
+
+    def test_find_empty_family_returns_none(self):
+        assert find_font_path_by_family("") is None
+        assert find_font_path_by_family(None) is None
+
+    def test_legacy_find_font_path_unchanged(self):
+        """find_font_path() без аргумента возвращает существующий путь или None."""
+        path = find_font_path()
+        assert path is None or os.path.exists(path)
+
+    def test_find_font_path_with_family_uses_it(self):
+        path = find_font_path(BARCODE_FONT_DEFAULT)
+        assert path and os.path.exists(path)

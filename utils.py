@@ -6,6 +6,8 @@ import csv
 import subprocess
 import platform
 import re
+import sys
+import struct
 from PIL import Image, ImageOps
 
 
@@ -191,8 +193,17 @@ def get_barcode_params(label_w_mm, label_h_mm, dpi=None):
 
 
 # ========== ПОИСК ШРИФТА ==========
-def find_font_path():
-    """Поиск системного шрифта"""
+def find_font_path(family=None):
+    """Поиск системного шрифта.
+
+    family — имя семейства из list_fonts(). Если оно задано и найден его
+    файл — вернёт его; иначе (или если не найден) — запасной список системных
+    шрифтов, как раньше.
+    """
+    if family:
+        path = find_font_path_by_family(family)
+        if path:
+            return path
     font_paths = [
         '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
         '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
@@ -203,6 +214,172 @@ def find_font_path():
     for font_path in font_paths:
         if os.path.exists(font_path):
             return font_path
+    return None
+
+
+# ========== ВЫБОР ШРИФТА ДЛЯ ПОДПИСИ ПОД ШТРИХКОДОМ ==========
+# Пользователь выбирает семейство из встроенного Montserrat и системных
+# шрифтов. Семейство определяется по name-таблице OpenType (без загрузки
+# всего файла в PIL — список строится быстро даже на Windows с ~400 шрифтами).
+
+BARCODE_FONT_DEFAULT = "Montserrat"
+
+
+def _project_root():
+    """Корень приложения — рядом с ним лежит папка fonts/."""
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _font_search_dirs():
+    """Каталоги, в которых ищем шрифты для выбора подписи."""
+    dirs = [os.path.join(_project_root(), "fonts")]
+    if os.name == "nt":
+        windir = os.environ.get("WINDIR")
+        if windir:
+            dirs.append(os.path.join(windir, "Fonts"))
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            dirs.append(os.path.join(local, "Microsoft", "Windows", "Fonts"))
+    elif sys.platform == "darwin":
+        dirs += ["/System/Library/Fonts", "/System/Library/Fonts/Supplemental",
+                 "/Library/Fonts", os.path.expanduser("~/Library/Fonts")]
+    else:
+        dirs += ["/usr/share/fonts", "/usr/local/share/fonts",
+                 os.path.expanduser("~/.fonts"), os.path.expanduser("~/.local/share/fonts")]
+    return [d for d in dirs if d and os.path.isdir(d)]
+
+
+def _font_files(dirs):
+    """Все файлы шрифтов (.ttf/.otf/.ttc) в каталогах."""
+    for directory in dirs:
+        for root, _, files in os.walk(directory):
+            for fn in files:
+                if fn.lower().endswith((".ttf", ".otf", ".ttc")):
+                    yield os.path.join(root, fn)
+
+
+def _family_from_name_table(data):
+    """Читает name-таблицу OpenType и возвращает имя семейства (nameID 1),
+    либо typographic family (nameID 16), если обычного имени нет."""
+    if len(data) < 10:
+        return None
+    try:
+        count = struct.unpack(">H", data[2:4])[0]
+        str_off = struct.unpack(">H", data[4:6])[0]
+    except Exception:
+        return None
+    fallback = None
+    for i in range(count):
+        rec = data[6 + i * 12: 6 + i * 12 + 12]
+        if len(rec) < 12:
+            break
+        try:
+            pid, eid, lid, nid, length, offset = struct.unpack(">HHHHHH", rec)
+        except Exception:
+            break
+        if nid not in (1, 16):
+            continue
+        # Учитываем записи: Windows (3), Unicode (0) и Mac (1)
+        if pid == 3:
+            if lid not in (0x409, 0):
+                continue
+            codec = "utf-16-be"
+        elif pid in (0, 1):
+            if lid != 0:
+                continue
+            codec = "utf-16-be" if pid == 0 else "mac_roman"
+        else:
+            continue
+        raw = data[str_off + offset: str_off + offset + length]
+        try:
+            name = raw.decode(codec, errors="ignore").strip("\x00 \t")
+        except Exception:
+            continue
+        if not name:
+            continue
+        if nid == 1:
+            return name
+        if fallback is None:
+            fallback = name
+    return fallback
+
+
+def _font_family_from_file(path):
+    """Имя семейства шрифта через быстрый разбор name-таблицы (без PIL)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+            if head[:4] == b"ttcf":  # коллекция .ttc — берём первый шрифт
+                num_fonts = struct.unpack(">I", head[8:12])[0]
+                if not num_fonts:
+                    return None
+                f.seek(12)
+                first_offset = struct.unpack(">I", f.read(4))[0]
+                f.seek(first_offset)
+                head = f.read(12)
+            if len(head) < 6:
+                return None
+            num_tables = struct.unpack(">H", head[4:6])[0]
+            records = f.read(num_tables * 16)
+            name_off = name_len = None
+            for i in range(num_tables):
+                rec = records[i * 16: i * 16 + 16]
+                if len(rec) < 16:
+                    break
+                tag, _checksum, off, ln = struct.unpack(">4sIII", rec)
+                if tag == b"name":
+                    name_off, name_len = off, ln
+                    break
+            if name_off is None:
+                return None
+            f.seek(name_off)
+            data = f.read(min(name_len, 65536))
+    except Exception:
+        return None
+    return _family_from_name_table(data)
+
+
+_fonts_list_cache = None
+
+
+def list_fonts(force=False):
+    """[(семейство, путь), ...] — все найденные шрифты, Montserrat первым.
+
+    Результат кэшируется: дорогое сканирование каталогов выполняется один раз.
+    """
+    global _fonts_list_cache
+    if _fonts_list_cache is not None and not force:
+        return _fonts_list_cache
+    bundled_dir = os.path.normcase(os.path.join(_project_root(), "fonts"))
+    seen = {}
+    for path in _font_files(_font_search_dirs()):
+        family = _font_family_from_file(path)
+        if not family:
+            continue
+        # Все веса встроенного Montserrat-*.ttf дают одно семейство
+        if os.path.normcase(os.path.dirname(path)) == bundled_dir:
+            family = BARCODE_FONT_DEFAULT
+        key = family.casefold()
+        if key not in seen:
+            seen[key] = (family, path)
+    result = sorted(seen.values(),
+                    key=lambda item: (item[0].casefold() != BARCODE_FONT_DEFAULT.casefold(),
+                                      item[0].casefold()))
+    _fonts_list_cache = result
+    return result
+
+
+def find_font_path_by_family(family):
+    """Путь к файлу выбранного семейства или None, если шрифт не найден."""
+    family = (family or "").strip()
+    if not family:
+        return None
+    target = family.casefold()
+    for name, path in list_fonts():
+        if name.casefold() == target:
+            return path
     return None
 
 

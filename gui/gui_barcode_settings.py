@@ -7,7 +7,7 @@ import tkinter as tk
 
 from . import theme as T
 from .gui_widgets import SettingsWindow
-from utils import LABEL_PRESETS, LABELS_PER_PAGE_OPTIONS, DPI_PRESETS, DEFAULT_DPI
+from utils import LABEL_PRESETS, LABELS_PER_PAGE_OPTIONS, DPI_PRESETS, DEFAULT_DPI, list_fonts
 from logger import logger
 
 CUSTOM_PRESET = "Свой размер"
@@ -38,6 +38,7 @@ class BarcodeSettingsWindow(SettingsWindow):
         self.show_border = tk.BooleanVar(value=a.show_border.get())
         self.use_template = tk.BooleanVar(value=a.use_template.get())
         self.show_text = tk.BooleanVar(value=a.show_text.get())
+        self.font_family_var = tk.StringVar(value=a.barcode_font_family.get())
         preset = a.selected_preset.get()
         self.preset_var = tk.StringVar(value=preset if preset in LABEL_PRESETS else CUSTOM_PRESET)
 
@@ -74,6 +75,13 @@ class BarcodeSettingsWindow(SettingsWindow):
         self.dpi_hint = T.label(quality, _dpi_hint(self.dpi_var.get()), size=12, color=T.TEXT_2)
         self.dpi_hint.pack(anchor="w", pady=(8, 0))
 
+        # ----- Шрифт подписи под штрихкодом -----
+        font_sec = self.section("Шрифт подписи",
+                                "Все системные шрифты и встроенный Montserrat. "
+                                "Действует, когда включено «Печатать код под штрихкодом»")
+        T.option_menu(font_sec, values=self._font_names(), variable=self.font_family_var,
+                      width=440).pack(anchor="w")
+
         # ----- Дополнительно -----
         extra = self.section("Дополнительно")
         for text, var in [
@@ -84,6 +92,18 @@ class BarcodeSettingsWindow(SettingsWindow):
             ("Использовать сохранённый шаблон этикетки", self.use_template),
         ]:
             T.switch(extra, text, var).pack(anchor="w", pady=5)
+
+    def _font_names(self):
+        """Имена семейств для выпадающего списка.
+
+        Сохранённый шрифт может быть не найден при текущем наборе установленных
+        шрифтов — тогда вставляем его первым, чтобы окно не показало пустоту.
+        """
+        names = [name for name, _ in list_fonts()]
+        current = self.font_family_var.get()
+        if current and current not in names:
+            names.insert(0, current)
+        return names or ["Montserrat"]
 
     def _apply_preset(self, name):
         if name in LABEL_PRESETS:
@@ -118,6 +138,7 @@ class BarcodeSettingsWindow(SettingsWindow):
         a.show_border.set(self.show_border.get())
         a.use_template.set(self.use_template.get())
         a.show_text.set(self.show_text.get())
+        a.barcode_font_family.set(self.font_family_var.get())
         if self.preset_var.get() in LABEL_PRESETS:
             a.selected_preset.set(self.preset_var.get())
             a.settings.set("selected_preset", self.preset_var.get())

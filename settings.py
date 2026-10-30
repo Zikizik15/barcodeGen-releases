@@ -178,6 +178,7 @@ class SettingsManager:
             "barcode_batch_mode": False,
             "barcode_use_template": True,
             "barcode_show_text": True,
+            "barcode_font_family": "Montserrat",
 
             # ===== Модуль «QR-паспорта» =====
             "qr_label_width": "58",

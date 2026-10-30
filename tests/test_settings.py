@@ -45,6 +45,13 @@ class TestLoad:
         assert sm.get("barcode_type") == "ean13"          # своё значение сохранено
         assert sm.get("barcode_show_text") is True         # новый ключ — по умолчанию
 
+    def test_font_family_default(self, files):
+        """У нового ключа barcode_font_family есть значение по умолчанию."""
+        files["SETTINGS_FILE"].write_text("{}", encoding="utf-8")
+        sm = SettingsManager()
+        from utils import BARCODE_FONT_DEFAULT
+        assert sm.get("barcode_font_family") == BARCODE_FONT_DEFAULT
+
 
 class TestSave:
     def test_update_writes_once(self, files, monkeypatch):

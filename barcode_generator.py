@@ -18,6 +18,7 @@ from utils import (
     make_qr_image,
     GRID_MAP,
     DEFAULT_QR_BOX_SIZE,
+    BARCODE_FONT_DEFAULT,
 )
 
 from logger import logger
@@ -79,6 +80,7 @@ class BarcodeGenerator:
         self.qr_box_size = s.get("qr_box_size", DEFAULT_QR_BOX_SIZE)
         self.show_text = s.get("barcode_show_text", True)
         self.use_template = s.get("barcode_use_template", True)
+        self.barcode_font_family = s.get("barcode_font_family", BARCODE_FONT_DEFAULT)
         # use_qr зафиксирован в False: модуль штрихкодов больше не умеет QR.
         self.use_qr = False
 
@@ -115,9 +117,27 @@ class BarcodeGenerator:
             'dpi': params['dpi'],
         }
 
+    def _label_font_path(self):
+        """Файл шрифта для подписи под штрихкодом.
+
+        Сначала — выбранное пользователем семейство, затем запасной системный
+        шрифт. Каждый кандидат проверяется реальной загрузкой в PIL, чтобы
+        повреждённый шрифт не сломал генерацию.
+        """
+        from PIL import ImageFont
+        for path in (find_font_path(self.barcode_font_family), find_font_path()):
+            if not path:
+                continue
+            try:
+                ImageFont.truetype(path, 10)
+                return path
+            except Exception as e:
+                logger.warning(f"Шрифт {path} не читается PIL ({e}), ищем запасной")
+        return None
+
     def get_writer(self):
         writer = ImageWriter()
-        font_path = find_font_path()
+        font_path = self._label_font_path()
         if font_path:
             writer.font_path = font_path
         writer.set_options(self.writer_options())
